@@ -466,7 +466,24 @@ class TimelineWidget(QWidget):
         e.accept()
 
     def mouseDoubleClickEvent(self, e):
-        pass
+        hit = self.hit_test(e.position().toPoint())
+        if hit.kind == "subtitle" and hit.clip_id:
+            sub = self.controller.project.subtitle_by_id(hit.clip_id)
+            if sub:
+                from PyQt6.QtWidgets import QInputDialog
+                text, ok = QInputDialog.getMultiLineText(
+                    self,
+                    tr("Edit Subtitle Text"),
+                    tr("Enter subtitle text content:"),
+                    sub.text
+                )
+                if ok and text is not None:
+                    self.controller.update_subtitle(sub.id, text=text)
+                    self.controller.timeline_changed.emit()
+                    main_win = self.window()
+                    if hasattr(main_win, "inspector"):
+                        main_win.inspector.select_subtitle(sub.id)
+        e.accept()
 
     def cursor_for(self, pos) -> Qt.CursorShape:
         hit = self.hit_test(pos)

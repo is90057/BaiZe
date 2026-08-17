@@ -33,6 +33,7 @@ class _DecodeJob(QRunnable):
 
     @pyqtSlot()
     def run(self):
+        arr = None
         try:
             is_base_ck = getattr(self.clip, "chroma_key_enabled", False)
             if self.has_alpha or self.is_image or is_base_ck:
@@ -121,14 +122,19 @@ class _DecodeJob(QRunnable):
                             arr = fx.composite_alpha(arr, o_rgba, opacity=1.0)
         except Exception:
             arr = None
-        from PyQt6.QtWidgets import QApplication
-        if arr is not None and QApplication.instance() is not None:
-            img = QImage(arr.data, self.w, self.h, self.w * 3,
-                         QImage.Format.Format_RGB888).copy()
-            try:
-                _emitter.frame_ready.emit(self.token, self.timeline_time, img)
-            except RuntimeError:
-                pass
+        finally:
+            from PyQt6.QtWidgets import QApplication
+            if QApplication.instance() is not None:
+                img = QImage()
+                if arr is not None and arr.size > 0:
+                    import numpy as np
+                    arr_c = np.ascontiguousarray(arr)
+                    img = QImage(arr_c.data, self.w, self.h, self.w * 3,
+                                 QImage.Format.Format_RGB888).copy()
+                try:
+                    _emitter.frame_ready.emit(self.token, self.timeline_time, img)
+                except RuntimeError:
+                    pass
 
 
 class PreviewWidget(QWidget):
@@ -143,6 +149,7 @@ class PreviewWidget(QWidget):
         self._token = 0
         self._rendered_token = 0
         self._pending = False
+        self._last_req_time = 0.0
         self._pixmap: QPixmap | None = None
         self._audio_clip_id: str | None = None
 
@@ -239,8 +246,14 @@ class PreviewWidget(QWidget):
         return 1280, 720
 
     def _request_frame(self, force: bool = False):
+        import time
+        now = time.time()
         if self._pending and not force:
-            return
+            if getattr(self, "_last_req_time", 0) and (now - self._last_req_time) > 0.3:
+                self._pending = False
+            else:
+                return
+        self._last_req_time = now
         project = self.controller.project
         active_video_clips = []
         for c in project.video_clips_at(self._time):
@@ -250,6 +263,7 @@ class PreviewWidget(QWidget):
 
         if not active_video_clips:
             self._pixmap = None
+            self._pending = False
             self.update()
             return
 
@@ -266,6 +280,7 @@ class PreviewWidget(QWidget):
         self._token += 1
         w, h = self._target_size()
         if not (w and h):
+            self._pending = False
             return
         self._pending = True
         from PyQt6.QtCore import QThreadPool
@@ -284,8 +299,9 @@ class PreviewWidget(QWidget):
         if token < self._rendered_token:
             return
         self._rendered_token = token
-        self._pixmap = QPixmap.fromImage(img)
-        self.update()
+        if img is not None and not img.isNull():
+            self._pixmap = QPixmap.fromImage(img)
+            self.update()
         if self._playing or token < self._token:
             self._request_frame()
 
@@ -293,6 +309,13 @@ class PreviewWidget(QWidget):
     def _sync_audio(self, t: float, force: bool = False):
         project = self.controller.project
         clip = project.active_clip_at("audio", t)
+        if clip is None:
+            for vclip in project.video_clips_at(t):
+                vmedia = project.clip_media(vclip)
+                if vmedia and vmedia.has_audio:
+                    clip = vclip
+                    break
+
         if clip is None:
             if self._audio_clip_id is not None or force:
                 self._player.stop()

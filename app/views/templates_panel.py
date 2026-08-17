@@ -484,6 +484,17 @@ class TemplatesPanel(QWidget):
         if not tmpl:
             return
 
+        default_text = tmpl.get("text", "TITLE HERE")
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            tr("Edit Template Text"),
+            tr("Enter custom text content for this template:"),
+            default_text
+        )
+        if not ok or not text.strip():
+            return
+        custom_text = text.strip()
+
         main_win = self.window()
         timeline = getattr(main_win, "timeline", None)
         playhead_time = timeline.playhead if timeline else 0.0
@@ -497,7 +508,7 @@ class TemplatesPanel(QWidget):
             pos = max(0.0, proj_dur - 4.5)
 
         sub = SubtitleClip(
-            text=tmpl.get("text", "TITLE HERE"),
+            text=custom_text,
             position=pos,
             duration=float(tmpl.get("duration", 4.0 if cat in ("intro", "outro") else 3.5)),
             font_family=tmpl.get("font_family", "Arial"),

@@ -60,6 +60,7 @@ class _Worker(QObject):
         self._proc = None
 
     def run(self):
+        err_lines = []
         try:
             self._proc = subprocess.Popen(
                 self._cmd, stdout=subprocess.PIPE,
@@ -71,6 +72,9 @@ class _Worker(QObject):
                 if not line and self._proc.poll() is not None:
                     break
                 if line:
+                    err_lines.append(line.strip())
+                    if len(err_lines) > 40:
+                        err_lines.pop(0)
                     info = fx.parse_ffmpeg_progress(line)
                     if info and self._duration > 0:
                         pct = min(100, int(100 * info["time"] / self._duration))
@@ -78,7 +82,10 @@ class _Worker(QObject):
                     else:
                         self.progress.emit("-1|")
             rc = self._proc.wait()
-            self.done.emit(rc == 0, "" if rc == 0 else "ffmpeg exited with an error.")
+            error_msg = ""
+            if rc != 0:
+                error_msg = "\n".join([l for l in err_lines if l and not l.startswith("frame=")][-6:]) or f"ffmpeg exited with code {rc}."
+            self.done.emit(rc == 0, error_msg)
         except Exception as exc:
             self.done.emit(False, str(exc))
 
@@ -262,7 +269,10 @@ class ExportDialog(QDialog):
         cmd = fx.build_ffmpeg_cmd(
             p, out, start=start, end=end, fps=fps_opt,
             resolution=res_opt, scale_mode=scale_mode,
-            video_bitrate=vbr, audio_bitrate=abr, crf=crf)
+            video_bitrate=vbr, audio_bitrate=abr, crf=crf,
+            video_codec=fmt.get("vc", "libx264"),
+            audio_codec=fmt.get("ac", "aac"),
+        )
         dur = self.duration()
         self._running = True
         self.start_btn.setEnabled(False)

@@ -82,9 +82,74 @@ def probe(path: str) -> dict:
     return result
 
 
+_CAP_CACHE: dict[str, tuple[any, float]] = {}
+import threading
+_CAP_LOCK = threading.Lock()
+
+
+def _get_cv2_frame(path: str, time_sec: float, width: int, height: int, is_rgba: bool = False) -> np.ndarray | None:
+    """Fast video frame decoding via OpenCV VideoCapture with caching."""
+    if not os.path.exists(path):
+        return None
+    try:
+        import cv2
+        with _CAP_LOCK:
+            cap = None
+            if path in _CAP_CACHE:
+                cap, _ = _CAP_CACHE[path]
+                if cap is not None and not cap.isOpened():
+                    cap = None
+            if cap is None:
+                cap = cv2.VideoCapture(path)
+                if not cap.isOpened():
+                    return None
+                if len(_CAP_CACHE) > 10:
+                    old_path, (old_cap, _) = next(iter(_CAP_CACHE.items()))
+                    try:
+                        old_cap.release()
+                    except Exception:
+                        pass
+                    _CAP_CACHE.pop(old_path, None)
+                _CAP_CACHE[path] = (cap, time_sec)
+
+            time_ms = max(0.0, time_sec * 1000.0)
+            cap.set(cv2.CAP_PROP_POS_MSEC, time_ms)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                return None
+
+            h, w = frame.shape[:2]
+            scale = min(width / w, height / h)
+            nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+
+            if is_rgba:
+                frame_conv = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+            else:
+                frame_conv = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            resized = cv2.resize(frame_conv, (nw, nh), interpolation=cv2.INTER_LINEAR)
+            channels = 4 if is_rgba else 3
+            canvas = np.zeros((height, width, channels), dtype=np.uint8)
+            if is_rgba:
+                canvas[:, :, 3] = 255
+            y0 = (height - nh) // 2
+            x0 = (width - nw) // 2
+            canvas[y0:y0+nh, x0:x0+nw] = resized
+            return np.ascontiguousarray(canvas)
+    except Exception:
+        return None
+
+
 def decode_frame(path: str, time_sec: float, width: int, height: int,
                  pix_fmt: str = "rgb24") -> np.ndarray:
     """Decode an accurate single frame to an HxWx3 uint8 numpy array."""
+    ext = Path(path).suffix.lower()
+    is_img = ext in (".bmp", ".jpg", ".jpeg", ".png", ".webp", ".gif")
+    if not is_img:
+        arr = _get_cv2_frame(path, time_sec, width, height, is_rgba=False)
+        if arr is not None:
+            return arr
+
     args = [
         FFMPEG, "-v", "error",
         "-ss", f"{max(time_sec, 0.0):.6f}",
@@ -99,7 +164,7 @@ def decode_frame(path: str, time_sec: float, width: int, height: int,
         data = _run(args)
         expected = width * height * 3
         if len(data) >= expected:
-            return np.frombuffer(data[:expected], dtype=np.uint8).reshape(height, width, 3)
+            return np.ascontiguousarray(np.frombuffer(data[:expected], dtype=np.uint8).reshape(height, width, 3))
     except Exception:
         pass
     return np.zeros((height, width, 3), dtype=np.uint8)
@@ -107,6 +172,11 @@ def decode_frame(path: str, time_sec: float, width: int, height: int,
 
 def decode_frame_rgba(path: str, time_sec: float, width: int, height: int, is_image: bool = False) -> np.ndarray:
     """Decode a single frame or image to an HxWx4 uint8 numpy array with Alpha channel."""
+    if not is_image:
+        arr = _get_cv2_frame(path, time_sec, width, height, is_rgba=True)
+        if arr is not None:
+            return arr
+
     args = [FFMPEG, "-v", "error"]
     if not is_image:
         args.extend(["-ss", f"{max(time_sec, 0.0):.6f}"])
@@ -122,7 +192,7 @@ def decode_frame_rgba(path: str, time_sec: float, width: int, height: int, is_im
         data = _run(args)
         expected = width * height * 4
         if len(data) >= expected:
-            return np.frombuffer(data[:expected], dtype=np.uint8).reshape(height, width, 4)
+            return np.ascontiguousarray(np.frombuffer(data[:expected], dtype=np.uint8).reshape(height, width, 4))
     except Exception:
         pass
     return np.zeros((height, width, 4), dtype=np.uint8)
@@ -254,6 +324,99 @@ def _resolve_cuts(clips, start: float, end: float):
     return out
 
 
+def _has_drawtext() -> bool:
+    """Check if ffmpeg build has the drawtext filter enabled."""
+    try:
+        proc = subprocess.run([FFMPEG, "-filters"], capture_output=True, text=True, timeout=5)
+        return "drawtext" in proc.stdout
+    except Exception:
+        return False
+
+
+def _render_subtitle_png(s, W: int, H: int, out_path: str) -> str:
+    """Render subtitle clip into a transparent PNG overlay image for FFmpeg overlay."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        font_size = max(12, int(s.font_size * (H / 720.0)))
+
+        font = None
+        for font_path in [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "C:/Windows/Fonts/msjh.ttc",
+            "C:/Windows/Fonts/arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]:
+            if os.path.exists(font_path):
+                try:
+                    font = ImageFont.truetype(font_path, font_size)
+                    break
+                except Exception:
+                    pass
+        if font is None:
+            font = ImageFont.load_default()
+
+        lines = s.text.splitlines() or [""]
+        line_bboxes = [draw.textbbox((0, 0), line, font=font) for line in lines]
+        text_w = max((b[2] - b[0] for b in line_bboxes), default=100)
+        line_h = max((b[3] - b[1] for b in line_bboxes), default=font_size) + 6
+        text_h = line_h * len(lines)
+
+        margin_x, margin_y = 20, int(H * 0.08)
+        if s.alignment == "top_center":
+            x, y = (W - text_w) // 2, margin_y
+        elif s.alignment == "center":
+            x, y = (W - text_w) // 2, (H - text_h) // 2
+        elif s.alignment == "bottom_left":
+            x, y = margin_x, H - margin_y - text_h
+        elif s.alignment == "bottom_right":
+            x, y = W - margin_x - text_w, H - margin_y - text_h
+        else:  # bottom_center
+            x, y = (W - text_w) // 2, H - margin_y - text_h
+
+        if s.bg_color:
+            bg_hex = s.bg_color.lstrip("#")
+            if len(bg_hex) == 6:
+                r, g, b = int(bg_hex[:2], 16), int(bg_hex[2:4], 16), int(bg_hex[4:6], 16)
+                bg_rgba = (r, g, b, 180)
+            elif len(bg_hex) == 8:
+                r, g, b, a = int(bg_hex[:2], 16), int(bg_hex[2:4], 16), int(bg_hex[4:6], 16), int(bg_hex[6:8], 16)
+                bg_rgba = (r, g, b, a)
+            else:
+                bg_rgba = (0, 0, 0, 160)
+            pad = 10
+            draw.rectangle([x - pad, y - pad, x + text_w + pad, y + text_h + pad], fill=bg_rgba)
+
+        font_hex = s.font_color.lstrip("#")
+        if len(font_hex) == 6:
+            font_rgba = (int(font_hex[:2], 16), int(font_hex[2:4], 16), int(font_hex[4:6], 16), 255)
+        else:
+            font_rgba = (255, 255, 255, 255)
+
+        stroke_w = getattr(s, "stroke_width", 0)
+        stroke_rgba = (0, 0, 0, 255)
+        if getattr(s, "stroke_color", ""):
+            st_hex = s.stroke_color.lstrip("#")
+            if len(st_hex) == 6:
+                stroke_rgba = (int(st_hex[:2], 16), int(st_hex[2:4], 16), int(st_hex[4:6], 16), 255)
+
+        for idx, line in enumerate(lines):
+            ly = y + idx * line_h
+            if stroke_w > 0:
+                draw.text((x, ly), line, font=font, fill=font_rgba, stroke_width=stroke_w, stroke_fill=stroke_rgba)
+            else:
+                draw.text((x, ly), line, font=font, fill=font_rgba)
+
+        img.save(out_path)
+        return out_path
+    except Exception:
+        return ""
+
+
 def build_ffmpeg_cmd(
     project,
     output: str,
@@ -265,6 +428,8 @@ def build_ffmpeg_cmd(
     video_bitrate: str = "",
     audio_bitrate: str = "192k",
     crf: int = 18,
+    video_codec: str = "libx264",
+    audio_codec: str = "aac",
 ) -> list[str]:
     """Build the full ffmpeg command that renders the timeline to `output`."""
     out_fps = float(fps or project.fps)
@@ -462,15 +627,29 @@ def build_ffmpeg_cmd(
             fil.append(f"[{base}][{upper}]overlay=format=auto:eof_action=pass[{ol}];")
             base = ol
 
-    # ---------- subtitles: drawtext filter ----------
+    # ---------- subtitles: drawtext or PNG overlay ----------
     if project.subtitles:
-        for s in sorted(project.subtitles, key=lambda x: x.position):
+        use_drawtext = _has_drawtext()
+        for idx_sub, s in enumerate(sorted(project.subtitles, key=lambda x: x.position)):
             if s.end <= start or s.position >= end or not s.text.strip():
                 continue
-            for dt_filter in _build_drawtext_filters(s, W, H):
-                dt_label = new_label("dt")
-                fil.append(f"[{base}]{dt_filter}[{dt_label}];")
-                base = dt_label
+            st = max(0.0, s.position - start)
+            et = max(st, s.end - start)
+            dur = max(0.1, et - st)
+
+            if use_drawtext:
+                for dt_filter in _build_drawtext_filters(s, W, H):
+                    dt_label = new_label("dt")
+                    fil.append(f"[{base}]{dt_filter}[{dt_label}];")
+                    base = dt_label
+            else:
+                tmp_png = os.path.join(tempfile.gettempdir(), f"baize_sub_{s.id}_{idx_sub}.png")
+                _render_subtitle_png(s, W, H, tmp_png)
+                if os.path.exists(tmp_png):
+                    sub_inp = new_input(tmp_png, 0.0, dur, is_image=True)
+                    ol_lbl = new_label("subov")
+                    fil.append(f"[{base}][{sub_inp}:v]overlay=enable='between(t,{st:.6f},{et:.6f})':format=auto[{ol_lbl}];")
+                    base = ol_lbl
 
     # ---------- audio: cut-resolve per track, concat gaps, amix across tracks ----------
     audio_map: str | None = None
@@ -533,10 +712,10 @@ def build_ffmpeg_cmd(
     cmd += ["-filter_complex", "".join(fil)]
     cmd += ["-map", f"[{base}]"]
     if audio_map is not None:
-        cmd += ["-map", f"[{audio_map}]", "-c:a", "aac", "-b:a", audio_bitrate, "-ar", "48000"]
+        cmd += ["-map", f"[{audio_map}]", "-c:a", audio_codec, "-b:a", audio_bitrate, "-ar", "48000"]
     cmd += [
         "-r", f"{out_fps:.3f}",
-        "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
+        "-c:v", video_codec, "-preset", "medium", "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
     ]
     if video_bitrate:

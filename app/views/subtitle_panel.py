@@ -105,6 +105,19 @@ class SubtitlePanel(QWidget):
         self.list.itemDoubleClicked.connect(self._on_item_double_clicked)
         lay.addWidget(self.list, 1)
 
+        # Edit Selected Subtitle Text Group
+        self.edit_box = QGroupBox(tr("Edit Selected Subtitle Text"))
+        edit_lay = QVBoxLayout(self.edit_box)
+        edit_lay.setContentsMargins(6, 6, 6, 6)
+        edit_lay.setSpacing(4)
+
+        self.edit_text_input = QPlainTextEdit()
+        self.edit_text_input.setPlaceholderText(tr("Select a subtitle from the list to edit its text..."))
+        self.edit_text_input.setMaximumHeight(55)
+        self.edit_text_input.textChanged.connect(self._on_edit_text_changed)
+        edit_lay.addWidget(self.edit_text_input)
+        lay.addWidget(self.edit_box)
+
         # SRT Import / Export buttons
         srt_lay = QHBoxLayout()
         self.import_srt_btn = QPushButton(tr("Import SRT…"))
@@ -137,6 +150,8 @@ class SubtitlePanel(QWidget):
         self.asr_start_btn.setText(tr("Recognize & Generate Subtitles"))
 
         self.text_input.setPlaceholderText(tr("Type subtitle text here..."))
+        self.edit_box.setTitle(tr("Edit Selected Subtitle Text"))
+        self.edit_text_input.setPlaceholderText(tr("Select a subtitle from the list to edit its text..."))
         self.add_btn.setText(tr("Add Subtitle at Playhead"))
         self.import_srt_btn.setText(tr("Import SRT…"))
         self.export_srt_btn.setText(tr("Export SRT…"))
@@ -215,6 +230,9 @@ class SubtitlePanel(QWidget):
     def refresh_list(self):
         self.list.clear()
         subs = sorted(self.controller.project.subtitles, key=lambda s: s.position)
+        curr_selected = getattr(self, "_selected_sub_id", None)
+        selected_item = None
+
         for s in subs:
             tc = fmt_timecode(s.position, self.controller.project.fps, compact=True)
             preview = s.text.replace("\n", " ")
@@ -222,6 +240,11 @@ class SubtitlePanel(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, s.id)
             item.setToolTip(f"[{tc}] ({s.duration:.1f}s)\n{s.text}")
             self.list.addItem(item)
+            if s.id == curr_selected:
+                selected_item = item
+
+        if selected_item:
+            self.list.setCurrentItem(selected_item)
 
     def _on_add_clicked(self):
         text = self.text_input.toPlainText().strip()
@@ -232,12 +255,31 @@ class SubtitlePanel(QWidget):
         sub = self.controller.add_subtitle(text, playhead_time, duration=3.0)
         self.text_input.clear()
         self.refresh_list()
+        self._selected_sub_id = sub.id
+        self._loading_edit = True
+        self.edit_text_input.setPlainText(sub.text)
+        self._loading_edit = False
         self.subtitle_selected.emit(sub.id)
 
     def _on_item_clicked(self, item: QListWidgetItem):
         sub_id = item.data(Qt.ItemDataRole.UserRole)
         if sub_id:
+            self._selected_sub_id = sub_id
+            sub = self.controller.project.subtitle_by_id(sub_id)
+            if sub:
+                self._loading_edit = True
+                self.edit_text_input.setPlainText(sub.text)
+                self._loading_edit = False
             self.subtitle_selected.emit(sub_id)
+
+    def _on_edit_text_changed(self):
+        if getattr(self, "_loading_edit", False):
+            return
+        sub_id = getattr(self, "_selected_sub_id", None)
+        if not sub_id:
+            return
+        new_text = self.edit_text_input.toPlainText()
+        self.controller.update_subtitle(sub_id, text=new_text)
 
     def _on_item_double_clicked(self, item: QListWidgetItem):
         sub_id = item.data(Qt.ItemDataRole.UserRole)
@@ -245,6 +287,19 @@ class SubtitlePanel(QWidget):
         if sub:
             self.seek_requested.emit(sub.position)
             self.subtitle_selected.emit(sub.id)
+            from PyQt6.QtWidgets import QInputDialog
+            text, ok = QInputDialog.getMultiLineText(
+                self,
+                tr("Edit Subtitle Text"),
+                tr("Enter subtitle text content:"),
+                sub.text
+            )
+            if ok and text is not None:
+                self.controller.update_subtitle(sub.id, text=text)
+                self._loading_edit = True
+                self.edit_text_input.setPlainText(text)
+                self._loading_edit = False
+                self.refresh_list()
 
     def _context_menu(self, pos):
         item = self.list.itemAt(pos)
@@ -255,10 +310,25 @@ class SubtitlePanel(QWidget):
         if sub is None:
             return
         menu = QMenu(self)
+        edit_act = menu.addAction(tr("Edit Subtitle Text…"))
         del_act = menu.addAction(tr("Delete Subtitle"))
         jump_act = menu.addAction(tr("Jump to Playhead"))
         action = menu.exec(self.list.mapToGlobal(pos))
-        if action == del_act:
+        if action == edit_act:
+            from PyQt6.QtWidgets import QInputDialog
+            text, ok = QInputDialog.getMultiLineText(
+                self,
+                tr("Edit Subtitle Text"),
+                tr("Enter subtitle text content:"),
+                sub.text
+            )
+            if ok and text is not None:
+                self.controller.update_subtitle(sub.id, text=text)
+                self._loading_edit = True
+                self.edit_text_input.setPlainText(text)
+                self._loading_edit = False
+                self.refresh_list()
+        elif action == del_act:
             self.controller.remove_subtitle(sub_id)
             self.refresh_list()
         elif action == jump_act:
