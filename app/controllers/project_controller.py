@@ -1,10 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QUndoStack, QUndoCommand
 
 from ..models.media import MediaClip, TimelineClip, SubtitleClip, new_id
 from ..models.project import Project
+
+
+def _clone_clip(c: TimelineClip, **overrides) -> TimelineClip:
+    masks = [dict(m) for m in getattr(c, "object_removal_masks", [])]
+    return replace(c, object_removal_masks=masks, **overrides)
+
+
+def _clone_subtitle(s: SubtitleClip, **overrides) -> SubtitleClip:
+    return replace(s, **overrides)
 
 
 class ProjectController(QObject):
@@ -56,13 +67,14 @@ class ProjectController(QObject):
             _MoveClip(self.project, clip_id, c.position, new_position,
                       c.track_index, new_track, kind))
 
-    def trim_clip(self, clip_id: str, new_trim_in: float, new_duration: float):
+    def trim_clip(self, clip_id: str, new_trim_in: float, new_duration: float, new_position: float | None = None):
         c = self.project.clip_by_id(clip_id)
         if c is None:
             return
         self.undo_stack.push(
             _TrimClip(self.project, clip_id, c.trim_in, c.duration,
-                      new_trim_in, new_duration))
+                      new_trim_in, new_duration, c.position,
+                      c.position if new_position is None else new_position))
 
     def remove_clip(self, clip_id: str, kind: str):
         c = self.project.clip_by_id(clip_id)
@@ -72,13 +84,90 @@ class ProjectController(QObject):
 
     def split_clip(self, clip_id: str, time: float, kind: str):
         c = self.project.clip_by_id(clip_id)
-        if c is None or not (c.position < time < c.end - 1e-3):
+        if c is None or not (c.position + 1e-3 < time < c.end - 1e-3):
             return
         self.undo_stack.push(_SplitClip(self.project, clip_id, time, kind))
+
+    def clip_kind(self, clip_id: str) -> str:
+        for tr in self.project.video_tracks:
+            if any(c.id == clip_id for c in tr.clips):
+                return "video"
+        return "audio"
+
+    def find_linked_clips(self, clip_id: str) -> list[TimelineClip]:
+        """Return [clip] plus any counterpart video/audio clips with same media_id and time span."""
+        c = self.project.clip_by_id(clip_id)
+        if c is None:
+            return []
+        kind = self.clip_kind(clip_id)
+        other_tracks = self.project.audio_tracks if kind == "video" else self.project.video_tracks
+        out = [c]
+        for tr in other_tracks:
+            for oc in tr.clips:
+                if (oc.media_id == c.media_id
+                        and abs(oc.position - c.position) < 0.05
+                        and abs(oc.duration - c.duration) < 0.05):
+                    out.append(oc)
+        return out
+
+    def split_at_time(self, time: float, clip_ids: list[str] | None = None) -> int:
+        """Split targeted clips (and linked counterparts) or all clips covering `time`."""
+        targets: list[tuple[TimelineClip, str]] = []
+        seen: set[str] = set()
+        if clip_ids:
+            for cid in clip_ids:
+                for lc in self.find_linked_clips(cid):
+                    if lc.id not in seen and (lc.position + 1e-3 < time < lc.end - 1e-3):
+                        seen.add(lc.id)
+                        targets.append((lc, self.clip_kind(lc.id)))
+        if not targets:
+            for tr in self.project.all_tracks():
+                if not tr.enabled:
+                    continue
+                for c in tr.clips:
+                    if c.id not in seen and (c.position + 1e-3 < time < c.end - 1e-3):
+                        seen.add(c.id)
+                        targets.append((c, tr.kind))
+        if not targets:
+            return 0
+        self.undo_stack.beginMacro("Split Clip")
+        for c, kind in targets:
+            self.undo_stack.push(_SplitClip(self.project, c.id, time, kind))
+        self.undo_stack.endMacro()
+        return len(targets)
+
+    def cut_time_intervals(self, intervals: list[tuple[float, float]], ripple: bool = True) -> float:
+        """Cut out one or more [t0, t1] time ranges across all video and audio tracks."""
+        valid = sorted((max(0.0, float(a)), float(b)) for a, b in intervals if b - a > 1e-3)
+        if not valid:
+            return 0.0
+        merged: list[tuple[float, float]] = []
+        for a, b in valid:
+            if merged and a <= merged[-1][1] + 1e-4:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        cmd = _CutIntervalsCommand(self.project, merged, ripple=ripple)
+        if not cmd.has_changes:
+            return 0.0
+        self.undo_stack.push(cmd)
+        self.set_selection([])
+        return sum(b - a for a, b in merged)
+
+    def cut_range(self, start_time: float, end_time: float, ripple: bool = True) -> float:
+        return self.cut_time_intervals([(start_time, end_time)], ripple=ripple)
+
+    def cut_selected_clips(self, ripple: bool = True) -> float:
+        clips = self.selected_clips()
+        if not clips:
+            return 0.0
+        intervals = [(c.position, c.end) for c in clips if c.duration > 1e-3]
+        return self.cut_time_intervals(intervals, ripple=ripple)
 
     def set_clip_volume(self, clip_id: str, volume: float):
         self._set_clip_prop(clip_id, "volume", volume)
 
+    def set_clip_opacity(self, clip_id: str, opacity: float):
         self._set_clip_prop(clip_id, "opacity", opacity)
 
     def set_clip_transition(
@@ -308,25 +397,28 @@ class _MoveClip(QUndoCommand):
 
 
 class _TrimClip(QUndoCommand):
-    def __init__(self, project, clip_id, old_in, old_dur, new_in, new_dur):
+    def __init__(self, project, clip_id, old_in, old_dur, new_in, new_dur, old_pos=None, new_pos=None):
         super().__init__("Trim Clip")
         self._p = project
         self._id = clip_id
         self._old_in, self._old_dur = old_in, old_dur
         self._new_in, self._new_dur = new_in, new_dur
+        self._old_pos, self._new_pos = old_pos, new_pos
 
     def redo(self):
-        self._apply(self._new_in, self._new_dur)
+        self._apply(self._new_in, self._new_dur, self._new_pos)
 
     def undo(self):
-        self._apply(self._old_in, self._old_dur)
+        self._apply(self._old_in, self._old_dur, self._old_pos)
 
-    def _apply(self, tin, dur):
+    def _apply(self, tin, dur, pos):
         c = self._p.clip_by_id(self._id)
         if c is None:
             return
         c.trim_in = max(tin, 0.0)
         c.duration = max(dur, 1e-3)
+        if pos is not None:
+            c.position = max(pos, 0.0)
 
 
 class _RemoveClip(QUndoCommand):
@@ -360,6 +452,7 @@ class _SplitClip(QUndoCommand):
         self._id = clip_id
         self._time = time
         self._kind = kind
+        self._orig: TimelineClip | None = None
         self._left: TimelineClip | None = None
         self._right: TimelineClip | None = None
         self._track_index = 0
@@ -370,34 +463,170 @@ class _SplitClip(QUndoCommand):
             return
         if self._left is None:
             t = self._time
+            self._orig = _clone_clip(c)
             self._track_index = c.track_index
-            self._left = TimelineClip(
-                media_id=c.media_id, position=c.position, duration=t - c.position,
-                trim_in=c.trim_in, volume=c.volume, opacity=c.opacity,
-                name=c.name, track_index=c.track_index, id=new_id())
-            self._right = TimelineClip(
-                media_id=c.media_id, position=t, duration=c.end - t,
-                trim_in=c.trim_in + (t - c.position), volume=c.volume,
-                opacity=c.opacity, name=c.name, track_index=c.track_index,
+            speed = getattr(c, "speed", 1.0)
+            left_dur = t - c.position
+            right_dur = c.end - t
+            self._left = _clone_clip(
+                c, duration=left_dur,
+                fade_out_duration=0.0,
+                fade_in_duration=min(getattr(c, "fade_in_duration", 0.0), left_dur),
+                id=new_id())
+            self._right = _clone_clip(
+                c, position=t, duration=right_dur,
+                trim_in=c.trim_in + left_dur * speed,
+                fade_in_duration=0.0,
+                fade_out_duration=min(getattr(c, "fade_out_duration", 0.0), right_dur),
                 id=new_id())
         track = _track_of(self._p, self._kind, self._track_index)
         track.clips = [x for x in track.clips if x.id != self._id]
-        track.clips.append(self._left)
-        track.clips.append(self._right)
+        track.clips.append(_clone_clip(self._left))
+        track.clips.append(_clone_clip(self._right))
 
     def undo(self):
-        if self._left is None:
+        if self._left is None or self._orig is None:
             return
         track = _track_of(self._p, self._kind, self._track_index)
         track.clips = [x for x in track.clips
                        if x.id not in (self._left.id, self._right.id)]
-        c = TimelineClip(
-            media_id=self._left.media_id, position=self._left.position,
-            duration=self._left.duration + self._right.duration,
-            trim_in=self._left.trim_in, volume=self._left.volume,
-            opacity=self._left.opacity, name=self._left.name,
-            track_index=self._track_index, id=self._id)
-        track.clips.append(c)
+        track.clips.append(_clone_clip(self._orig))
+
+
+class _CutIntervalsCommand(QUndoCommand):
+    def __init__(self, project: Project, intervals: list[tuple[float, float]], ripple: bool = True):
+        super().__init__("Cut Selected Segment")
+        self._p = project
+        self._before_video = [[_clone_clip(c) for c in tr.clips] for tr in project.video_tracks]
+        self._before_audio = [[_clone_clip(c) for c in tr.clips] for tr in project.audio_tracks]
+        self._before_subs = [_clone_subtitle(s) for s in project.subtitles]
+
+        after_video = [[_clone_clip(c) for c in tr.clips] for tr in project.video_tracks]
+        after_audio = [[_clone_clip(c) for c in tr.clips] for tr in project.audio_tracks]
+        after_subs = [_clone_subtitle(s) for s in project.subtitles]
+
+        changed = False
+        for t0, t1 in sorted(intervals, key=lambda x: x[0], reverse=True):
+            for idx, tr in enumerate(project.video_tracks):
+                if tr.enabled:
+                    new_clips, ch = self._cut_clips_list(after_video[idx], t0, t1, ripple)
+                    after_video[idx] = new_clips
+                    changed = changed or ch
+            for idx, tr in enumerate(project.audio_tracks):
+                if tr.enabled:
+                    new_clips, ch = self._cut_clips_list(after_audio[idx], t0, t1, ripple)
+                    after_audio[idx] = new_clips
+                    changed = changed or ch
+            after_subs, sub_ch = self._cut_subs_list(after_subs, t0, t1, ripple)
+            changed = changed or sub_ch
+
+        self._after_video = after_video
+        self._after_audio = after_audio
+        self._after_subs = after_subs
+        self.has_changes = changed
+
+    @staticmethod
+    def _cut_clips_list(clips: list[TimelineClip], t0: float, t1: float, ripple: bool) -> tuple[list[TimelineClip], bool]:
+        eps = 1e-4
+        cut_dur = t1 - t0
+        out: list[TimelineClip] = []
+        changed = False
+        for c in sorted(clips, key=lambda x: x.position):
+            speed = getattr(c, "speed", 1.0)
+            if c.end <= t0 + eps:
+                out.append(c)
+            elif c.position >= t1 - eps:
+                if ripple:
+                    out.append(_clone_clip(c, position=max(0.0, c.position - cut_dur)))
+                    changed = True
+                else:
+                    out.append(c)
+            elif c.position >= t0 - eps and c.end <= t1 + eps:
+                changed = True
+            elif c.position < t0 - eps and c.end > t1 + eps:
+                left_dur = t0 - c.position
+                right_dur = c.end - t1
+                left = _clone_clip(
+                    c, duration=left_dur,
+                    fade_out_duration=0.0,
+                    fade_in_duration=min(getattr(c, "fade_in_duration", 0.0), left_dur))
+                right = _clone_clip(
+                    c, id=new_id(),
+                    position=t0 if ripple else t1,
+                    duration=right_dur,
+                    trim_in=c.trim_in + (t1 - c.position) * speed,
+                    fade_in_duration=0.0,
+                    fade_out_duration=min(getattr(c, "fade_out_duration", 0.0), right_dur))
+                out.append(left)
+                out.append(right)
+                changed = True
+            elif c.position < t0 - eps and t0 < c.end <= t1 + eps:
+                new_dur = t0 - c.position
+                out.append(_clone_clip(
+                    c, duration=new_dur,
+                    fade_out_duration=0.0,
+                    fade_in_duration=min(getattr(c, "fade_in_duration", 0.0), new_dur)))
+                changed = True
+            elif t0 - eps <= c.position < t1 and c.end > t1 + eps:
+                cut_head = t1 - c.position
+                new_dur = c.end - t1
+                out.append(_clone_clip(
+                    c, position=t0 if ripple else t1,
+                    duration=new_dur,
+                    trim_in=c.trim_in + cut_head * speed,
+                    fade_in_duration=0.0,
+                    fade_out_duration=min(getattr(c, "fade_out_duration", 0.0), new_dur)))
+                changed = True
+        return out, changed
+
+    @staticmethod
+    def _cut_subs_list(subs: list[SubtitleClip], t0: float, t1: float, ripple: bool) -> tuple[list[SubtitleClip], bool]:
+        eps = 1e-4
+        cut_dur = t1 - t0
+        out: list[SubtitleClip] = []
+        changed = False
+        for s in sorted(subs, key=lambda x: x.position):
+            if s.end <= t0 + eps:
+                out.append(s)
+            elif s.position >= t1 - eps:
+                if ripple:
+                    out.append(_clone_subtitle(s, position=max(0.0, s.position - cut_dur)))
+                    changed = True
+                else:
+                    out.append(s)
+            elif s.position >= t0 - eps and s.end <= t1 + eps:
+                changed = True
+            elif s.position < t0 - eps and s.end > t1 + eps:
+                left_dur = t0 - s.position
+                right_dur = s.end - t1
+                out.append(_clone_subtitle(s, duration=left_dur))
+                out.append(_clone_subtitle(s, id=new_id(), position=t0 if ripple else t1, duration=right_dur))
+                changed = True
+            elif s.position < t0 - eps and t0 < s.end <= t1 + eps:
+                out.append(_clone_subtitle(s, duration=t0 - s.position))
+                changed = True
+            elif t0 - eps <= s.position < t1 and s.end > t1 + eps:
+                out.append(_clone_subtitle(s, position=t0 if ripple else t1, duration=s.end - t1))
+                changed = True
+        return out, changed
+
+    def redo(self):
+        for idx, tr in enumerate(self._p.video_tracks):
+            if idx < len(self._after_video):
+                tr.clips = [_clone_clip(c) for c in self._after_video[idx]]
+        for idx, tr in enumerate(self._p.audio_tracks):
+            if idx < len(self._after_audio):
+                tr.clips = [_clone_clip(c) for c in self._after_audio[idx]]
+        self._p.subtitles = [_clone_subtitle(s) for s in self._after_subs]
+
+    def undo(self):
+        for idx, tr in enumerate(self._p.video_tracks):
+            if idx < len(self._before_video):
+                tr.clips = [_clone_clip(c) for c in self._before_video[idx]]
+        for idx, tr in enumerate(self._p.audio_tracks):
+            if idx < len(self._before_audio):
+                tr.clips = [_clone_clip(c) for c in self._before_audio[idx]]
+        self._p.subtitles = [_clone_subtitle(s) for s in self._before_subs]
 
 
 class _SetProp(QUndoCommand):

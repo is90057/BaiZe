@@ -42,6 +42,8 @@ class TimelineWidget(QWidget):
     playhead_changed = pyqtSignal(float)
     seek_requested = pyqtSignal(float)
     user_action = pyqtSignal()
+    marks_changed = pyqtSignal()
+    cut_requested = pyqtSignal()
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -53,6 +55,8 @@ class TimelineWidget(QWidget):
         self.playhead = 0.0
         self.in_point = -1.0
         self.out_point = -1.0
+        self.range_select_mode = False
+        self._range_drag = None
         self._drag = None
         self._snapshot = None
         self._snap_marker = None
@@ -62,6 +66,11 @@ class TimelineWidget(QWidget):
         self.controller.project_changed.connect(self.on_project_changed)
         self.controller.timeline_changed.connect(self.update_preview)
         self.on_project_changed()
+
+    def set_range_select_mode(self, enabled: bool):
+        self.range_select_mode = enabled
+        self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.ArrowCursor)
+        self.update()
 
     # ---------------- geometry ----------------
     def track_height(self, kind: str) -> int:
@@ -164,6 +173,7 @@ class TimelineWidget(QWidget):
         self.rebuild_geometry()
         self.paint_ruler(p)
         self.paint_tracks(p)
+        self.paint_in_out_range(p)
         self.paint_playhead(p)
         if self._snap_marker is not None:
             self.paint_snap_marker(p)
@@ -366,6 +376,55 @@ class TimelineWidget(QWidget):
                     p.drawText(QRectF(x + w - out_w, y0 + h - 14, out_w - 2, 12),
                                Qt.AlignmentFlag.AlignRight, c.fade_out_type[:6])
 
+    def paint_in_out_range(self, p: QPainter):
+        th = self.total_height()
+        has_in = self.in_point >= 0
+        has_out = self.out_point >= 0
+        if has_in and has_out and self.out_point > self.in_point:
+            x0 = max(float(NAME_W), self.x_for(self.in_point))
+            x1 = max(x0, self.x_for(self.out_point))
+            w = x1 - x0
+            # Track area highlight
+            p.fillRect(QRectF(x0, RULER_H, w, th - RULER_H), QColor(235, 75, 60, 65))
+            # Ruler area highlight
+            p.fillRect(QRectF(x0, 0, w, RULER_H), QColor(220, 65, 55, 130))
+
+            # Left & Right boundary lines and handles
+            p.setPen(QPen(QColor(255, 110, 90, 235), 2.0))
+            p.drawLine(int(x0), 0, int(x0), th)
+            p.drawLine(int(x1), 0, int(x1), th)
+
+            p.setBrush(QColor(235, 75, 60))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(QRectF(x0, 2, 6, RULER_H - 4), 2, 2)
+            p.drawRoundedRect(QRectF(x1 - 6, 2, 6, RULER_H - 4), 2, 2)
+
+            if w > 64:
+                dur = self.out_point - self.in_point
+                badge = f"✂ {tr('Selected')}: {fmt_timecode(dur, self.controller.project.fps, compact=True)}"
+                p.setFont(QFont("Helvetica", 8, QFont.Weight.Bold))
+                p.setPen(QColor(255, 245, 240))
+                p.drawText(
+                    QRectF(x0 + 8, 2, w - 16, RULER_H - 4),
+                    Qt.AlignmentFlag.AlignCenter,
+                    badge,
+                )
+        else:
+            if has_in:
+                xi = int(max(float(NAME_W), self.x_for(self.in_point)))
+                p.setPen(QPen(QColor(80, 210, 120, 220), 2.0))
+                p.drawLine(xi, 0, xi, th)
+                p.setBrush(QColor(80, 210, 120))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(QRectF(xi, 2, 6, RULER_H - 4), 2, 2)
+            if has_out:
+                xo = int(max(float(NAME_W), self.x_for(self.out_point)))
+                p.setPen(QPen(QColor(245, 150, 60, 220), 2.0))
+                p.drawLine(xo, 0, xo, th)
+                p.setBrush(QColor(245, 150, 60))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRoundedRect(QRectF(xo - 6, 2, 6, RULER_H - 4), 2, 2)
+
     def paint_playhead(self, p: QPainter):
         x = int(self.x_for(self.playhead))
         if x < 0 or x > self.content_width() + 10:
@@ -395,6 +454,10 @@ class TimelineWidget(QWidget):
         x, y = pos.x(), pos.y()
         project = self.controller.project
         if y < RULER_H:
+            if self.in_point >= 0 and abs(x - self.x_for(self.in_point)) <= 8:
+                return HitResult("ruler", -1, None, "in_handle")
+            if self.out_point >= 0 and abs(x - self.x_for(self.out_point)) <= 8:
+                return HitResult("ruler", -1, None, "out_handle")
             return HitResult("ruler", -1, None, "ruler")
         for kind, idx, y0 in self._tracks_geom:
             h = self.track_height(kind)
@@ -423,6 +486,22 @@ class TimelineWidget(QWidget):
         hit = self.hit_test(e.position().toPoint())
         self._hover_hit = hit
         if e.button() == Qt.MouseButton.LeftButton:
+            if hit.area in ("in_handle", "out_handle"):
+                self._range_drag = (hit.area, 0.0)
+                e.accept()
+                return
+            if self.range_select_mode or (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+                t0 = max(0.0, self.time_for(e.position().x()))
+                self.controller.clear_selection()
+                self._range_drag = ("new_range", t0)
+                self.in_point = t0
+                self.out_point = t0
+                self.set_playhead(t0)
+                self.seek_requested.emit(self.playhead)
+                self.marks_changed.emit()
+                self.update()
+                e.accept()
+                return
             if hit.kind == "subtitle":
                 main_win = self.window()
                 if hasattr(main_win, "inspector"):
@@ -437,19 +516,55 @@ class TimelineWidget(QWidget):
                 c = self.controller.project.clip_by_id(hit.clip_id)
                 if c is None:
                     return
-                if c.id not in self.controller._selected:
-                    self.controller.set_selection([c.id])
+                linked_ids = [lc.id for lc in self.controller.find_linked_clips(c.id)]
+                if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    curr = list(self.controller._selected)
+                    if c.id in curr:
+                        for lid in linked_ids:
+                            if lid in curr:
+                                curr.remove(lid)
+                    else:
+                        for lid in linked_ids:
+                            if lid not in curr:
+                                curr.append(lid)
+                    self.controller.set_selection(curr)
+                elif c.id not in self.controller._selected:
+                    self.controller.set_selection(linked_ids)
                 self._begin_drag(hit, e.position())
         elif e.button() == Qt.MouseButton.RightButton:
             if hit.area in ("body", "left", "right"):
-                self.controller.set_selection([hit.clip_id])
+                if hit.clip_id not in self.controller._selected:
+                    linked_ids = [lc.id for lc in self.controller.find_linked_clips(hit.clip_id)]
+                    self.controller.set_selection(linked_ids)
+                self.show_context_menu(e.globalPosition().toPoint(), hit)
+            elif self.in_point >= 0 and self.out_point > self.in_point:
                 self.show_context_menu(e.globalPosition().toPoint(), hit)
             else:
                 self.controller.clear_selection()
         e.accept()
 
     def mouseMoveEvent(self, e):
-        if (e.buttons() & Qt.MouseButton.LeftButton) and self._drag:
+        if (e.buttons() & Qt.MouseButton.LeftButton) and self._range_drag:
+            mode, anchor = self._range_drag
+            t = max(0.0, min(self.time_for(e.position().x()), self.controller.project.duration() + BLANK_TAIL))
+            if mode == "new_range":
+                self.in_point = min(anchor, t)
+                self.out_point = max(anchor, t)
+            elif mode == "in_handle":
+                if self.out_point >= 0:
+                    self.in_point = min(t, max(0.0, self.out_point - MIN_FRAME))
+                else:
+                    self.in_point = t
+            elif mode == "out_handle":
+                if self.in_point >= 0:
+                    self.out_point = max(t, self.in_point + MIN_FRAME)
+                else:
+                    self.out_point = t
+            self.set_playhead(t)
+            self.seek_requested.emit(self.playhead)
+            self.marks_changed.emit()
+            self.update()
+        elif (e.buttons() & Qt.MouseButton.LeftButton) and self._drag:
             self._update_drag(e.position())
         elif (e.buttons() & Qt.MouseButton.LeftButton) and self._scrub:
             self.set_playhead(self.time_for(e.position().x()))
@@ -460,6 +575,12 @@ class TimelineWidget(QWidget):
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            if self._range_drag:
+                if self.out_point >= 0 and self.in_point >= 0 and self.out_point - self.in_point < 1e-3:
+                    self.out_point = -1.0
+                    self.marks_changed.emit()
+                self._range_drag = None
+                self.update()
             if self._drag:
                 self._commit_drag()
             self._scrub = False
@@ -486,8 +607,10 @@ class TimelineWidget(QWidget):
         e.accept()
 
     def cursor_for(self, pos) -> Qt.CursorShape:
+        if self.range_select_mode:
+            return Qt.CursorShape.CrossCursor
         hit = self.hit_test(pos)
-        if hit.area in ("left", "right"):
+        if hit.area in ("left", "right", "in_handle", "out_handle"):
             return Qt.CursorShape.SizeHorCursor
         if hit.area == "body":
             return Qt.CursorShape.SizeAllCursor
@@ -497,9 +620,19 @@ class TimelineWidget(QWidget):
     def _begin_drag(self, hit: HitResult, pos: QPointF):
         c = self.controller.project.clip_by_id(hit.clip_id)
         media = self.controller.project.clip_media(c)
+        linked = [
+            dict(
+                clip_id=lc.id, kind=self.controller.clip_kind(lc.id),
+                position=lc.position, trim_in=lc.trim_in,
+                duration=lc.duration, track_index=lc.track_index,
+            )
+            for lc in self.controller.find_linked_clips(c.id)
+            if lc.id != c.id
+        ]
         self._snapshot = dict(
             clip_id=c.id, kind=hit.kind, position=c.position, trim_in=c.trim_in,
             duration=c.duration, track_index=c.track_index,
+            linked=linked,
         )
         self._drag = dict(
             mode=hit.area, session_x0=pos.x(), session_y0=pos.y(),
@@ -514,10 +647,15 @@ class TimelineWidget(QWidget):
         project = self.controller.project
         if self.playhead > 1e-4:
             cands.add(self.playhead)
+        if self.in_point >= 0:
+            cands.add(self.in_point)
+        if self.out_point >= 0:
+            cands.add(self.out_point)
+        skip_ids = {self._snapshot["clip_id"]} | {l["clip_id"] for l in self._snapshot.get("linked", [])}
         for kind, idx, _ in self._tracks_geom:
             if kind in ("video", "audio"):
                 for cc in project.track(kind, idx).clips:
-                    if cc.id == self._snapshot["clip_id"]:
+                    if cc.id in skip_ids:
                         continue
                     cands.add(cc.position)
                     cands.add(cc.end)
@@ -540,13 +678,14 @@ class TimelineWidget(QWidget):
             return
         kind = self._snapshot["kind"]
         dx = (pos.x() - d["session_x0"]) / self.px_per_sec
-        dy = pos.y() - d["session_y0"]
 
         if d["mode"] == "body":
             new_pos = self._snap(d["start_pos"] + dx)
             if new_pos < 0:
                 new_pos = 0.0
-            new_idx = self.track_at_y(pos.y()) or d["start_track"]
+            new_idx = self.track_at_y(pos.y(), kind)
+            if new_idx is None:
+                new_idx = d["start_track"]
             if new_idx != c.track_index:
                 project = self.controller.project
                 old = project.track(kind, c.track_index)
@@ -554,6 +693,10 @@ class TimelineWidget(QWidget):
                 c.track_index = new_idx
                 project.track(kind, new_idx).clips.append(c)
             c.position = new_pos
+            for linfo in self._snapshot.get("linked", []):
+                lc = self.controller.project.clip_by_id(linfo["clip_id"])
+                if lc:
+                    lc.position = new_pos
             d["ghost"] = (kind, new_idx, c, self.track_y(kind, new_idx), new_pos, c.duration)
 
         elif d["mode"] == "left":
@@ -570,6 +713,12 @@ class TimelineWidget(QWidget):
             c.trim_in = new_in
             c.position = edge
             c.duration = new_dur
+            for linfo in self._snapshot.get("linked", []):
+                lc = self.controller.project.clip_by_id(linfo["clip_id"])
+                if lc:
+                    lc.trim_in = new_in
+                    lc.position = edge
+                    lc.duration = new_dur
             d["ghost"] = (kind, c.track_index, c, self.track_y(kind, c.track_index),
                           c.position, c.duration)
 
@@ -577,14 +726,18 @@ class TimelineWidget(QWidget):
             new_dur = self._snap(d["start_dur"] + dx)
             new_dur = max(MIN_FRAME, min(new_dur, d["src_dur"] - d["start_in"]))
             c.duration = new_dur
+            for linfo in self._snapshot.get("linked", []):
+                lc = self.controller.project.clip_by_id(linfo["clip_id"])
+                if lc:
+                    lc.duration = new_dur
             d["ghost"] = (kind, c.track_index, c, self.track_y(kind, c.track_index),
                           c.position, c.duration)
 
         self.update()
 
-    def track_at_y(self, y: float) -> int | None:
+    def track_at_y(self, y: float, target_kind: str | None = None) -> int | None:
         for kind, idx, y0 in self._tracks_geom:
-            if kind in ("video", "audio"):
+            if kind in ("video", "audio") and (target_kind is None or kind == target_kind):
                 h = self.track_height(kind)
                 if y0 <= y < y0 + h:
                     return idx
@@ -600,18 +753,89 @@ class TimelineWidget(QWidget):
             self.update()
             return
         kind = snap["kind"]
-        if d["mode"] == "body":
-            self.controller.move_clip(c.id, c.position, c.track_index, kind)
-        elif d["mode"] == "left":
-            self.controller.trim_clip(c.id, c.trim_in, c.duration)
-        else:
-            self.controller.trim_clip(c.id, c.trim_in, c.duration)
+        final_pos, final_track = c.position, c.track_index
+        final_in, final_dur = c.trim_in, c.duration
+
+        # Restore original properties before pushing undo commands
+        if c.track_index != snap["track_index"]:
+            project = self.controller.project
+            cur_tr = project.track(kind, c.track_index)
+            cur_tr.clips = [x for x in cur_tr.clips if x.id != c.id]
+            c.track_index = snap["track_index"]
+            project.track(kind, snap["track_index"]).clips.append(c)
+        c.position = snap["position"]
+        c.trim_in = snap["trim_in"]
+        c.duration = snap["duration"]
+        for linfo in snap.get("linked", []):
+            lc = self.controller.project.clip_by_id(linfo["clip_id"])
+            if lc:
+                lc.position = linfo["position"]
+                lc.trim_in = linfo["trim_in"]
+                lc.duration = linfo["duration"]
+
+        moved_or_trimmed = (
+            abs(final_pos - snap["position"]) > 1e-5
+            or final_track != snap["track_index"]
+            or abs(final_in - snap["trim_in"]) > 1e-5
+            or abs(final_dur - snap["duration"]) > 1e-5
+        )
+        if moved_or_trimmed:
+            linked = snap.get("linked", [])
+            if linked:
+                self.controller.undo_stack.beginMacro("Edit Clip")
+            if d["mode"] == "body":
+                self.controller.move_clip(c.id, final_pos, final_track, kind)
+                for linfo in linked:
+                    self.controller.move_clip(linfo["clip_id"], final_pos, linfo["track_index"], linfo["kind"])
+            else:
+                self.controller.trim_clip(c.id, final_in, final_dur, final_pos)
+                for linfo in linked:
+                    self.controller.trim_clip(linfo["clip_id"], final_in, final_dur, final_pos)
+            if linked:
+                self.controller.undo_stack.endMacro()
         self.update()
 
     # ---------------- actions ----------------
-    def split_at_playhead(self):
-        for c in list(self.controller.selected_clips()):
-            self.controller.split_clip(c.id, self.playhead, self.kind_of(c))
+    def split_at_playhead(self) -> int:
+        return self.controller.split_at_time(self.playhead, self.controller._selected)
+
+    def cut_selected(self) -> float:
+        """Cut out the selected unwanted segment (In-Out range or selected clips) across video & audio."""
+        if self.in_point >= 0 and self.out_point > self.in_point + 1e-3:
+            t0, t1 = self.in_point, self.out_point
+            cut_dur = self.controller.cut_range(t0, t1, ripple=True)
+            if cut_dur > 0:
+                self.in_point = -1.0
+                self.out_point = -1.0
+                self.marks_changed.emit()
+                self.set_playhead(t0)
+                self.seek_requested.emit(self.playhead)
+                self.update()
+            return cut_dur
+
+        clips = self.controller.selected_clips()
+        if clips:
+            earliest = min(c.position for c in clips)
+            cut_dur = self.controller.cut_selected_clips(ripple=True)
+            if cut_dur > 0:
+                self.set_playhead(earliest)
+                self.seek_requested.emit(self.playhead)
+                self.update()
+            return cut_dur
+
+        if self.in_point >= 0 and abs(self.playhead - self.in_point) > 1e-3:
+            t0, t1 = min(self.in_point, self.playhead), max(self.in_point, self.playhead)
+            cut_dur = self.controller.cut_range(t0, t1, ripple=True)
+            if cut_dur > 0:
+                self.in_point = -1.0
+                self.out_point = -1.0
+                self.marks_changed.emit()
+                self.set_playhead(t0)
+                self.seek_requested.emit(self.playhead)
+                self.update()
+            return cut_dur
+
+        return 0.0
 
     def kind_of(self, c) -> str:
         for kind, idx, _ in self._tracks_geom:
@@ -622,8 +846,20 @@ class TimelineWidget(QWidget):
         return "video"
 
     def delete_selected(self):
-        for c in list(self.controller.selected_clips()):
-            self.controller.remove_clip(c.id, self.kind_of(c))
+        clips = list(self.controller.selected_clips())
+        if not clips:
+            return
+        seen: set[str] = set()
+        targets = []
+        for c in clips:
+            for lc in self.controller.find_linked_clips(c.id):
+                if lc.id not in seen:
+                    seen.add(lc.id)
+                    targets.append(lc)
+        self.controller.undo_stack.beginMacro("Delete Clip")
+        for lc in targets:
+            self.controller.remove_clip(lc.id, self.kind_of(lc))
+        self.controller.undo_stack.endMacro()
         self.controller.set_selection([])
 
     def nudge_playhead(self, frames: int):
@@ -648,11 +884,14 @@ class TimelineWidget(QWidget):
         menu.setStyleSheet(
             "QMenu { background: #26262c; color: #e2e2e2; border: 1px solid #3a3a42;}"
             "QMenu::item:selected { background: #3a6ea5; }")
+        act_cut = menu.addAction(tr("Cut Selected (Video & Audio)\tCtrl+X"))
         act_split = menu.addAction(tr("Split at Playhead\tCtrl+B"))
         menu.addSeparator()
         act_delete = menu.addAction(tr("Delete Clip\tDelete"))
         action = menu.exec(global_pos)
-        if action == act_split:
+        if action == act_cut:
+            self.cut_requested.emit()
+        elif action == act_split:
             self.split_at_playhead()
         elif action == act_delete:
             self.delete_selected()

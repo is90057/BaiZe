@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import numpy as np
 from PyQt6.QtCore import Qt, QSize, QRectF, QTimer, QObject, QRunnable, pyqtSignal, pyqtSlot, QUrl
 from PyQt6.QtGui import QImage, QPainter, QColor, QPen, QFont, QPixmap, QBrush
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QWidget, QApplication
 
 from ..core import ffmpeg as fx
 from ..core.utils import fmt_timecode
@@ -123,11 +124,9 @@ class _DecodeJob(QRunnable):
         except Exception:
             arr = None
         finally:
-            from PyQt6.QtWidgets import QApplication
             if QApplication.instance() is not None:
                 img = QImage()
                 if arr is not None and arr.size > 0:
-                    import numpy as np
                     arr_c = np.ascontiguousarray(arr)
                     img = QImage(arr_c.data, self.w, self.h, self.w * 3,
                                  QImage.Format.Format_RGB888).copy()
@@ -165,6 +164,18 @@ class PreviewWidget(QWidget):
         self.setMinimumSize(320, 200)
         self._emitter_sig = _emitter.frame_ready
         self._emitter_sig.connect(self._on_frame)
+        self.controller.timeline_changed.connect(self._on_timeline_updated)
+
+    def _on_timeline_updated(self):
+        cap = self.controller.project.duration()
+        if cap > 0 and self._time > cap:
+            self._time = cap
+        self._request_frame(force=True)
+        if self._playing:
+            self._sync_audio(self._time, force=True)
+        else:
+            self._audio_clip_id = None
+        self.update()
 
     def retranslate(self):
         self.update()
@@ -323,12 +334,15 @@ class PreviewWidget(QWidget):
             return
         media = project.clip_media(clip)
         new_id = clip.id if (media and media.has_audio) else None
-        if self._audio_clip_id != new_id or force:
+        clip_switched = self._audio_clip_id != new_id
+        if clip_switched or force:
             self._audio_clip_id = new_id
             if new_id is None:
                 self._player.stop()
                 return
-            self._player.setSource(QUrl.fromLocalFile(media.path))
+            file_url = QUrl.fromLocalFile(media.path)
+            if self._player.source() != file_url:
+                self._player.setSource(file_url)
             self._audio_output.setVolume(max(0.0, min(1.0, float(clip.volume))))
         speed = getattr(clip, "speed", 1.0)
         self._player.setPlaybackRate(speed)
@@ -336,7 +350,7 @@ class PreviewWidget(QWidget):
         if self._player.playbackState() != self._player.PlaybackState.PlayingState:
             self._player.play()
             self._player.setPosition(src_ms)
-        elif abs(self._player.position() - src_ms) > 400:
+        elif clip_switched or force or abs(self._player.position() - src_ms) > 250:
             self._player.setPosition(src_ms)
 
     # ---------------- painting ----------------

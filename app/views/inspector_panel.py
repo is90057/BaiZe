@@ -4,7 +4,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QLabel, QLineEdit, QSlider,
     QDoubleSpinBox, QGroupBox, QComboBox, QScrollArea, QPushButton,
-    QSpinBox, QCheckBox, QHBoxLayout,
+    QSpinBox, QCheckBox, QHBoxLayout, QPlainTextEdit, QColorDialog,
 )
 
 from ..i18n import tr
@@ -119,6 +119,15 @@ class InspectorPanel(QWidget):
         self._label_video_fx = QLabel(tr("Video Effect"))
         self._form.addRow(self._label_video_fx, self.video_fx_combo)
 
+        self.cut_clip_btn = QPushButton(f"✂️ {tr('Cut Selected Segment')}")
+        self.cut_clip_btn.setStyleSheet(
+            "QPushButton { background: #b83b3b; color: #ffffff; font-weight: bold; "
+            "padding: 5px 10px; border-radius: 4px; }"
+            "QPushButton:hover { background: #cf4545; }"
+        )
+        self.cut_clip_btn.clicked.connect(self._on_cut_clicked)
+        self._form.addRow(self.cut_clip_btn)
+
         self.group.setLayout(self._form)
         self.group.setVisible(False)
         lay.addWidget(self.group)
@@ -169,7 +178,6 @@ class InspectorPanel(QWidget):
         self._sub_form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-        from PyQt6.QtWidgets import QPlainTextEdit, QSpinBox, QPushButton, QColorDialog
         self.sub_text_edit = QPlainTextEdit()
         self.sub_text_edit.setMaximumHeight(65)
         self.sub_text_edit.textChanged.connect(self.commit_subtitle)
@@ -255,7 +263,6 @@ class InspectorPanel(QWidget):
         lay.addWidget(self.sub_group)
 
         # Chroma Key Group
-        from PyQt6.QtWidgets import QCheckBox, QHBoxLayout
         self.ck_group = QGroupBox(tr("Chroma Key (Green Screen)"))
         self._ck_form = QFormLayout(self.ck_group)
 
@@ -449,6 +456,7 @@ class InspectorPanel(QWidget):
         self._label_trim.setText(tr("Trim In (s)"))
         self._label_vol.setText(tr("Volume"))
         self._label_opacity.setText(tr("Opacity"))
+        self.cut_clip_btn.setText(f"✂️ {tr('Cut Selected Segment')}")
 
         self.trans_group.setTitle(tr("Transitions"))
         self._label_in_type.setText(tr("Fade In (Entry)"))
@@ -499,7 +507,7 @@ class InspectorPanel(QWidget):
     def on_selection_changed(self, clip_ids: list[str]):
         clips = [c for c in (self.controller.project.clip_by_id(i) for i in clip_ids)
                  if c is not None]
-        if len(clips) != 1:
+        if not clips:
             self._clip_id = None
             if not getattr(self, "_sub_id", None):
                 self.group.setVisible(False)
@@ -508,6 +516,7 @@ class InspectorPanel(QWidget):
                 self.speed_group.setVisible(False)
                 self.cc_group.setVisible(False)
                 self.bf_group.setVisible(False)
+                self.obj_removal_group.setVisible(False)
                 self.sub_group.setVisible(False)
                 self.placeholder.setVisible(True)
                 self.stats.setText(self._project_stats())
@@ -516,7 +525,9 @@ class InspectorPanel(QWidget):
         self.sub_group.setVisible(False)
         self.placeholder.setVisible(False)
         self.group.setVisible(True)
-        self._clip_id = clips[0].id
+        video_ids = {c.id for tr in self.controller.project.video_tracks for c in tr.clips}
+        primary = next((c for c in clips if c.id in video_ids), clips[0])
+        self._clip_id = primary.id
         self.reload()
 
     def select_subtitle(self, sub_id: str):
@@ -670,12 +681,18 @@ class InspectorPanel(QWidget):
         if c:
             self.controller.trim_clip(c.id, v, c.duration)
 
+    def _on_cut_clicked(self):
+        win = self.window()
+        if hasattr(win, "cut_selected"):
+            win.cut_selected()
+
     def commit_volume(self, v):
         if self._loading:
             return
         c = self._clip()
         if c:
-            self.controller.set_clip_volume(c.id, v / 100.0)
+            for lc in self.controller.find_linked_clips(c.id):
+                self.controller.set_clip_volume(lc.id, v / 100.0)
 
     def commit_opacity(self, v):
         if self._loading:
@@ -785,7 +802,9 @@ class InspectorPanel(QWidget):
             return
         c = self._clip()
         if c:
-            self.controller.set_clip_speed(c.id, float(self.speed_spin.value()))
+            val = float(self.speed_spin.value())
+            for lc in self.controller.find_linked_clips(c.id):
+                self.controller.set_clip_speed(lc.id, val)
 
     def _set_speed_preset(self, val: float):
         self.speed_spin.setValue(val)

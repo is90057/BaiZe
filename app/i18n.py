@@ -27,6 +27,7 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "Quit": {"zh_TW": "結束", "zh_CN": "退出"},
     "&Undo": {"zh_TW": "復原(&U)", "zh_CN": "撤销(&U)"},
     "&Redo": {"zh_TW": "重做(&R)", "zh_CN": "重做(&R)"},
+    "Cut Selected (Video & Audio)": {"zh_TW": "剪輯選取片段 (剪除影片及音檔)", "zh_CN": "剪辑所选片段 (剪除视频及音频)"},
     "Split Selected at Playhead": {"zh_TW": "在播放頭處剪斷選取片段", "zh_CN": "在播放头处剪切所选片段"},
     "Delete Selected": {"zh_TW": "刪除選取片段", "zh_CN": "删除所选片段"},
     "Set In Point": {"zh_TW": "設定起點", "zh_CN": "设置入点"},
@@ -54,6 +55,29 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "Clear In/Out": {"zh_TW": "清除起點/終點", "zh_CN": "清除入点/出点"},
     "In": {"zh_TW": "入點", "zh_CN": "入点"},
     "Out": {"zh_TW": "出點", "zh_CN": "出点"},
+    "Select Range": {"zh_TW": "選取區間", "zh_CN": "选取区间"},
+    "Select Range on Timeline  (Shift+Drag)": {
+        "zh_TW": "在時間軸拖曳選取不要的片段區間 (或按住 Shift 拖曳)",
+        "zh_CN": "在时间轴拖动选取不要的片段区间 (或按住 Shift 拖动)",
+    },
+    "Split": {"zh_TW": "分割", "zh_CN": "分割"},
+    "Split at Playhead  (Ctrl+B)": {"zh_TW": "在播放頭處分割片段 (Ctrl+B)", "zh_CN": "在播放头处分割片段 (Ctrl+B)"},
+    "Cut": {"zh_TW": "剪輯", "zh_CN": "剪辑"},
+    "Cut Selected Segment": {"zh_TW": "剪輯 (剪除選取片段)", "zh_CN": "剪辑 (剪除所选片段)"},
+    "Cut Selected Segment (Video & Audio)  (Ctrl+X)": {
+        "zh_TW": "剪輯：將選取的影片及音檔剪掉 (Ctrl+X)",
+        "zh_CN": "剪辑：将所选的视频及音频剪掉 (Ctrl+X)",
+    },
+    "Selected": {"zh_TW": "已選取", "zh_CN": "已选取"},
+    "Split clip at playhead": {"zh_TW": "已在播放頭處分割影片及音訊片段", "zh_CN": "已在播放头处分割视频及音频片段"},
+    "Cut {dur:.2f}s of selected video and audio": {
+        "zh_TW": "已將選取的影片及音檔剪掉 ({dur:.2f} 秒)",
+        "zh_CN": "已将所选的视频及音频剪掉 ({dur:.2f} 秒)",
+    },
+    "Please select an unwanted clip on the timeline or mark an In–Out range first, then click Cut.": {
+        "zh_TW": "請先在時間軸點選不要的片段，或使用「選取區間 / 設定起終點 (I/O)」標記範圍後，再點選「剪輯」。",
+        "zh_CN": "请先在时间轴点选不要的片段，或使用「选取区间 / 设置入出点 (I/O)」标记范围后，再点选「剪辑」。",
+    },
 
     # ---- media panel ----
     "Media Library": {"zh_TW": "媒體庫", "zh_CN": "媒体库"},
@@ -69,13 +93,17 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
         "zh_TW": "{name} 已在時間軸上使用，無法移除。", "zh_CN": "{name} 已在时间轴上使用，无法移除。"},
 
     # ---- timeline ----
+    "Cut Selected (Video & Audio)\tCtrl+X": {
+        "zh_TW": "✂️ 剪輯選取片段 (剪除影片及音檔)\tCtrl+X",
+        "zh_CN": "✂️ 剪辑所选片段 (剪除视频及音频)\tCtrl+X",
+    },
     "Split at Playhead\tCtrl+B": {"zh_TW": "在播放頭處剪斷\tCtrl+B", "zh_CN": "在播放头处剪切\tCtrl+B"},
     "Delete Clip\tDelete": {"zh_TW": "刪除片段\tDelete", "zh_CN": "删除片段\tDelete"},
 
     # ---- timeline hint ----
     "Timeline hint": {
-        "zh_TW": "時間軸 • 拖曳片段移動 • 拖曳邊緣修剪 • 滾輪捲動 • Ctrl+滾輪縮放",
-        "zh_CN": "时间轴 • 拖动片段移动 • 拖动边缘修剪 • 滚轮滚动 • Ctrl+滚轮缩放"},
+        "zh_TW": "時間軸 • 點選不要的片段或按住 Shift 拖曳選取區間，點選「✂️ 剪輯」即可將選取的影片及音檔剪掉 • Ctrl+滾輪縮放",
+        "zh_CN": "时间轴 • 点选不要的片段或按住 Shift 拖动选取区间，点选「✂️ 剪辑」即可将所选的视频及音频剪掉 • Ctrl+滚轮缩放"},
 
     # ---- inspector ----
     "Inspector": {"zh_TW": "檢查器", "zh_CN": "检查器"},

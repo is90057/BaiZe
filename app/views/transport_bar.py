@@ -17,6 +17,9 @@ class TransportBar(QWidget):
     in_pressed = pyqtSignal()
     out_pressed = pyqtSignal()
     clear_marks_pressed = pyqtSignal()
+    split_pressed = pyqtSignal()
+    cut_pressed = pyqtSignal()
+    range_mode_toggled = pyqtSignal(bool)
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -100,10 +103,37 @@ class TransportBar(QWidget):
         self.out_label.setObjectName("markLabel")
         lay.addWidget(self.out_label)
 
-        btn_clr = b("×", None)
-        btn_clr.setToolTip(tr("Clear In/Out"))
-        btn_clr.clicked.connect(self.clear_marks_pressed)
-        lay.addWidget(btn_clr)
+        self.btn_clr = b("×", None)
+        self.btn_clr.setToolTip(tr("Clear In/Out"))
+        self.btn_clr.clicked.connect(self.clear_marks_pressed)
+        lay.addWidget(self.btn_clr)
+
+        lay.addWidget(self._vsep())
+
+        self.btn_range = QToolButton()
+        self.btn_range.setText(f"⬚ {tr('Select Range')}")
+        self.btn_range.setCheckable(True)
+        self.btn_range.setToolTip(tr("Select Range on Timeline  (Shift+Drag)"))
+        self.btn_range.toggled.connect(self.range_mode_toggled)
+        lay.addWidget(self.btn_range)
+
+        self.btn_split = QToolButton()
+        self.btn_split.setText(f"✂ {tr('Split')}")
+        self.btn_split.setToolTip(tr("Split at Playhead  (Ctrl+B)"))
+        self.btn_split.clicked.connect(self.split_pressed)
+        lay.addWidget(self.btn_split)
+
+        self.btn_cut = QToolButton()
+        self.btn_cut.setText(f"✂️ {tr('Cut')}")
+        self.btn_cut.setToolTip(tr("Cut Selected Segment (Video & Audio)  (Ctrl+X)"))
+        self.btn_cut.setStyleSheet(
+            "QToolButton { background: #b83b3b; color: #ffffff; font-weight: bold; "
+            "padding: 3px 10px; border-radius: 4px; border: 1px solid #d9534f; }"
+            "QToolButton:hover { background: #cf4545; }"
+            "QToolButton:pressed { background: #962d2d; }"
+        )
+        self.btn_cut.clicked.connect(self.cut_pressed)
+        lay.addWidget(self.btn_cut)
 
         self.setObjectName("transport")
         self._playing = False
@@ -135,8 +165,15 @@ class TransportBar(QWidget):
     def retranslate(self):
         self.btn_play.setToolTip(tr("Play / Pause  (Space)"))
         for b, key in ((self.btn_in, "Set In Point  (I)"),
-                       (self.btn_out, "Set Out Point  (O)")):
+                       (self.btn_out, "Set Out Point  (O)"),
+                       (self.btn_clr, "Clear In/Out")):
             b.setToolTip(tr(key))
+        self.btn_range.setText(f"⬚ {tr('Select Range')}")
+        self.btn_range.setToolTip(tr("Select Range on Timeline  (Shift+Drag)"))
+        self.btn_split.setText(f"✂ {tr('Split')}")
+        self.btn_split.setToolTip(tr("Split at Playhead  (Ctrl+B)"))
+        self.btn_cut.setText(f"✂️ {tr('Cut')}")
+        self.btn_cut.setToolTip(tr("Cut Selected Segment (Video & Audio)  (Ctrl+X)"))
         self._update_marks_text()
 
     def set_playing(self, playing: bool):

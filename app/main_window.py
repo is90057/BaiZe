@@ -134,6 +134,8 @@ class MainWindow(QMainWindow):
         # preview <-> timeline sync
         self.preview.time_changed.connect(self._sync_from_preview)
         self.timeline.playhead_changed.connect(self._sync_from_timeline)
+        self.timeline.marks_changed.connect(self.update_marks)
+        self.timeline.cut_requested.connect(self.cut_selected)
 
         # transport
         self.transport.play_toggled.connect(self.toggle_play)
@@ -143,6 +145,9 @@ class MainWindow(QMainWindow):
         self.transport.in_pressed.connect(self.set_in_point)
         self.transport.out_pressed.connect(self.set_out_point)
         self.transport.clear_marks_pressed.connect(self.clear_marks)
+        self.transport.range_mode_toggled.connect(self.timeline.set_range_select_mode)
+        self.transport.split_pressed.connect(self.split_clip)
+        self.transport.cut_pressed.connect(self.cut_selected)
 
         # preview play state -> transport icon
         self.preview.play_state_changed.connect(self.transport.set_playing)
@@ -193,7 +198,23 @@ class MainWindow(QMainWindow):
             self.preview.play()
 
     def split_clip(self):
-        self.timeline.split_at_playhead()
+        n = self.timeline.split_at_playhead()
+        if n > 0:
+            self.status.showMessage(tr("Split clip at playhead"))
+
+    def cut_selected(self):
+        cut_dur = self.timeline.cut_selected()
+        if cut_dur > 0:
+            self.preview.set_time(self.timeline.playhead)
+            self.status.showMessage(
+                tr("Cut {dur:.2f}s of selected video and audio").format(dur=cut_dur)
+            )
+        else:
+            QMessageBox.information(
+                self,
+                tr("Cut"),
+                tr("Please select an unwanted clip on the timeline or mark an In–Out range first, then click Cut."),
+            )
 
     def delete_selected(self):
         self.timeline.delete_selected()
@@ -305,6 +326,7 @@ class MainWindow(QMainWindow):
     # ---------------- menu ----------------
     def _build_menu(self):
         mb = self.menuBar()
+        mb.clear()
         c = self.controller
 
         self.m_file = mb.addMenu(tr("&File"))
@@ -332,6 +354,7 @@ class MainWindow(QMainWindow):
         self.m_edit.addAction(self.undo_action)
         self.m_edit.addAction(self.redo_action)
         self.m_edit.addSeparator()
+        self.m_edit.addAction(tr("Cut Selected (Video & Audio)"), QKeySequence("Ctrl+X"), self.cut_selected)
         self.m_edit.addAction(tr("Split Selected at Playhead"), self.split_clip)
         self.m_edit.addAction(tr("Delete Selected"), self.delete_selected)
         self.m_edit.addAction(tr("Set In Point"), QKeySequence("I"), self.set_in_point)

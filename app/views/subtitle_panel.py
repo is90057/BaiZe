@@ -176,6 +176,8 @@ class SubtitlePanel(QWidget):
         )
         self._progress_dlg.setWindowTitle(tr("Speech Recognition Progress"))
         self._progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        self._progress_dlg.setAutoReset(False)
+        self._progress_dlg.setAutoClose(False)
         self._progress_dlg.setValue(5)
         self._progress_dlg.canceled.connect(self._on_asr_canceled)
         self._progress_dlg.show()
@@ -194,14 +196,17 @@ class SubtitlePanel(QWidget):
         self._asr_thread.start()
 
     def _on_asr_progress(self, val: int, msg: str):
+        if not self._progress_dlg:
+            return
+        self._progress_dlg.setLabelText(msg)
         if self._progress_dlg:
             self._progress_dlg.setValue(val)
-            self._progress_dlg.setLabelText(msg)
 
     def _on_asr_finished(self, clips: list):
         if self._progress_dlg:
             self._progress_dlg.close()
             self._progress_dlg = None
+        self._asr_thread = None
 
         if clips:
             self.controller.add_auto_subtitles(clips)
@@ -218,6 +223,7 @@ class SubtitlePanel(QWidget):
         if self._progress_dlg:
             self._progress_dlg.close()
             self._progress_dlg = None
+        self._asr_thread = None
         QMessageBox.critical(
             self, tr("Speech Recognition Failed"),
             f"{tr('Speech Recognition Failed')}:\n{err_msg}")
@@ -226,6 +232,10 @@ class SubtitlePanel(QWidget):
         if self._asr_thread:
             self._asr_thread.cancel()
             self._asr_thread.quit()
+            self._asr_thread = None
+        if self._progress_dlg:
+            self._progress_dlg.close()
+            self._progress_dlg = None
 
     def refresh_list(self):
         self.list.clear()
