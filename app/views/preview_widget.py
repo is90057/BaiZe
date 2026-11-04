@@ -32,95 +32,95 @@ class _DecodeJob(QRunnable):
         self.has_alpha = has_alpha
         self.overlay_info = overlay_info or []
 
+    def _decode_and_process_layer(self, clip, path: str, src_time: float, is_image: bool, has_alpha: bool) -> np.ndarray | None:
+        pip_w = float(getattr(clip, "pip_w", 1.0) if clip else 1.0)
+        pip_h = float(getattr(clip, "pip_h", 1.0) if clip else 1.0)
+        lw = max(2, int(round(pip_w * self.w)) & ~1)
+        lh = max(2, int(round(pip_h * self.h)) & ~1)
+        is_ck = bool(getattr(clip, "chroma_key_enabled", False)) if clip else False
+
+        if has_alpha or is_image or is_ck:
+            layer = fx.decode_frame_rgba(path, src_time, lw, lh, is_image=is_image)
+            if layer is None:
+                return None
+            if is_ck and clip is not None:
+                layer = fx.apply_chroma_key(
+                    layer, clip.chroma_key_color,
+                    clip.chroma_key_similarity, clip.chroma_key_smoothness
+                )
+        else:
+            layer = fx.decode_frame(path, src_time, lw, lh)
+            if layer is None:
+                return None
+
+        if clip is not None:
+            br = getattr(clip, "brightness", 0.0)
+            ct = getattr(clip, "contrast", 1.0)
+            sat = getattr(clip, "saturation", 1.0)
+            if abs(br) > 1e-4 or abs(ct - 1.0) > 1e-4 or abs(sat - 1.0) > 1e-4:
+                layer = fx.process_color_correction(layer, br, ct, sat)
+
+            fm = getattr(clip, "focus_mode", "none")
+            ba = getattr(clip, "blur_amount", 0.0)
+            if fm != "none" or ba > 0:
+                layer = fx.process_blur_focus(layer, fm, ba)
+
+            vfx = getattr(clip, "video_fx", "none")
+            if vfx != "none":
+                layer = fx.process_video_effect(layer, vfx, current_time=self.timeline_time)
+
+            if getattr(clip, "object_removal_enabled", False):
+                masks = getattr(clip, "object_removal_masks", [])
+                if masks:
+                    layer = fx.apply_object_removal_inpainting(layer, masks)
+
+            if layer.shape[2] == 3:
+                layer = fx.process_frame_transition(layer, clip, self.timeline_time)
+            else:
+                rgb_part = fx.process_frame_transition(layer[:, :, :3], clip, self.timeline_time)
+                layer = np.dstack([rgb_part, layer[:, :, 3]])
+
+        return layer
+
     @pyqtSlot()
     def run(self):
         arr = None
         try:
-            is_base_ck = getattr(self.clip, "chroma_key_enabled", False)
-            if self.has_alpha or self.is_image or is_base_ck:
-                rgba = fx.decode_frame_rgba(self.path, self.src_time, self.w, self.h, is_image=self.is_image)
-                if is_base_ck:
-                    rgba = fx.apply_chroma_key(
-                        rgba, self.clip.chroma_key_color,
-                        self.clip.chroma_key_similarity, self.clip.chroma_key_smoothness
-                    )
-                base_rgb = np.zeros((self.h, self.w, 3), dtype=np.uint8)
-                op = self.clip.opacity if self.clip else 1.0
-                arr = fx.composite_alpha(base_rgb, rgba, opacity=op)
-            else:
-                arr = fx.decode_frame(self.path, self.src_time, self.w, self.h)
+            canvas = np.zeros((self.h, self.w, 3), dtype=np.uint8)
+            base_layer = self._decode_and_process_layer(
+                self.clip, self.path, self.src_time, self.is_image, self.has_alpha
+            )
+            if base_layer is not None:
+                canvas = fx.composite_pip_layer(
+                    canvas,
+                    base_layer,
+                    pip_x=float(getattr(self.clip, "pip_x", 0.0) if self.clip else 0.0),
+                    pip_y=float(getattr(self.clip, "pip_y", 0.0) if self.clip else 0.0),
+                    pip_w=float(getattr(self.clip, "pip_w", 1.0) if self.clip else 1.0),
+                    pip_h=float(getattr(self.clip, "pip_h", 1.0) if self.clip else 1.0),
+                    opacity=float(getattr(self.clip, "opacity", 1.0) if self.clip else 1.0),
+                    border_width=int(getattr(self.clip, "pip_border_width", 0) if self.clip else 0),
+                    border_color=str(getattr(self.clip, "pip_border_color", "#FFFFFF") if self.clip else "#FFFFFF"),
+                )
 
-            if arr is not None and self.clip is not None:
-                br = getattr(self.clip, "brightness", 0.0)
-                ct = getattr(self.clip, "contrast", 1.0)
-                sat = getattr(self.clip, "saturation", 1.0)
-                if abs(br) > 1e-4 or abs(ct - 1.0) > 1e-4 or abs(sat - 1.0) > 1e-4:
-                    arr = fx.process_color_correction(arr, br, ct, sat)
-
-                fm = getattr(self.clip, "focus_mode", "none")
-                ba = getattr(self.clip, "blur_amount", 0.0)
-                if fm != "none" or ba > 0:
-                    arr = fx.process_blur_focus(arr, fm, ba)
-
-                base_fx = getattr(self.clip, "video_fx", "none")
-                if base_fx != "none":
-                    arr = fx.process_video_effect(arr, base_fx, current_time=self.timeline_time)
-
-                if getattr(self.clip, "object_removal_enabled", False):
-                    masks = getattr(self.clip, "object_removal_masks", [])
-                    if masks:
-                        arr = fx.apply_object_removal_inpainting(arr, masks)
-
-                arr = fx.process_frame_transition(arr, self.clip, self.timeline_time)
-
-            if arr is not None and self.overlay_info:
+            if self.overlay_info:
                 for o_clip, o_media, o_src_time in self.overlay_info:
-                    is_o_ck = getattr(o_clip, "chroma_key_enabled", False)
-                    if o_media.has_alpha or o_media.is_image or is_o_ck:
-                        o_rgba = fx.decode_frame_rgba(o_media.path, o_src_time, self.w, self.h, is_image=o_media.is_image)
-                        if is_o_ck:
-                            o_rgba = fx.apply_chroma_key(
-                                o_rgba, o_clip.chroma_key_color,
-                                o_clip.chroma_key_similarity, o_clip.chroma_key_smoothness
-                            )
-                        o_br = getattr(o_clip, "brightness", 0.0)
-                        o_ct = getattr(o_clip, "contrast", 1.0)
-                        o_sat = getattr(o_clip, "saturation", 1.0)
-                        if abs(o_br) > 1e-4 or abs(o_ct - 1.0) > 1e-4 or abs(o_sat - 1.0) > 1e-4:
-                            o_rgba = fx.process_color_correction(o_rgba, o_br, o_ct, o_sat)
-                        o_fm = getattr(o_clip, "focus_mode", "none")
-                        o_ba = getattr(o_clip, "blur_amount", 0.0)
-                        if o_fm != "none" or o_ba > 0:
-                            o_rgba = fx.process_blur_focus(o_rgba, o_fm, o_ba)
-                        o_fx = getattr(o_clip, "video_fx", "none")
-                        if o_fx != "none":
-                            o_rgba = fx.process_video_effect(o_rgba, o_fx, current_time=self.timeline_time)
-                        if getattr(o_clip, "object_removal_enabled", False):
-                            o_masks = getattr(o_clip, "object_removal_masks", [])
-                            if o_masks:
-                                o_rgba = fx.apply_object_removal_inpainting(o_rgba, o_masks)
-                        arr = fx.composite_alpha(arr, o_rgba, opacity=o_clip.opacity)
-                    else:
-                        o_rgb = fx.decode_frame(o_media.path, o_src_time, self.w, self.h)
-                        if o_rgb is not None:
-                            o_br = getattr(o_clip, "brightness", 0.0)
-                            o_ct = getattr(o_clip, "contrast", 1.0)
-                            o_sat = getattr(o_clip, "saturation", 1.0)
-                            if abs(o_br) > 1e-4 or abs(o_ct - 1.0) > 1e-4 or abs(o_sat - 1.0) > 1e-4:
-                                o_rgb = fx.process_color_correction(o_rgb, o_br, o_ct, o_sat)
-                            o_fm = getattr(o_clip, "focus_mode", "none")
-                            o_ba = getattr(o_clip, "blur_amount", 0.0)
-                            if o_fm != "none" or o_ba > 0:
-                                o_rgb = fx.process_blur_focus(o_rgb, o_fm, o_ba)
-                            o_fx = getattr(o_clip, "video_fx", "none")
-                            if o_fx != "none":
-                                o_rgb = fx.process_video_effect(o_rgb, o_fx, current_time=self.timeline_time)
-                            if getattr(o_clip, "object_removal_enabled", False):
-                                o_masks = getattr(o_clip, "object_removal_masks", [])
-                                if o_masks:
-                                    o_rgb = fx.apply_object_removal_inpainting(o_rgb, o_masks)
-                            o_rgba = np.dstack([o_rgb, np.full((self.h, self.w), int(o_clip.opacity * 255), dtype=np.uint8)])
-                            arr = fx.composite_alpha(arr, o_rgba, opacity=1.0)
+                    o_layer = self._decode_and_process_layer(
+                        o_clip, o_media.path, o_src_time, o_media.is_image, o_media.has_alpha
+                    )
+                    if o_layer is not None:
+                        canvas = fx.composite_pip_layer(
+                            canvas,
+                            o_layer,
+                            pip_x=float(getattr(o_clip, "pip_x", 0.0)),
+                            pip_y=float(getattr(o_clip, "pip_y", 0.0)),
+                            pip_w=float(getattr(o_clip, "pip_w", 1.0)),
+                            pip_h=float(getattr(o_clip, "pip_h", 1.0)),
+                            opacity=float(getattr(o_clip, "opacity", 1.0)),
+                            border_width=int(getattr(o_clip, "pip_border_width", 0)),
+                            border_color=str(getattr(o_clip, "pip_border_color", "#FFFFFF")),
+                        )
+            arr = canvas
         except Exception:
             arr = None
         finally:
@@ -139,6 +139,8 @@ class _DecodeJob(QRunnable):
 class PreviewWidget(QWidget):
     time_changed = pyqtSignal(float)
     play_state_changed = pyqtSignal(bool)
+    pip_mode_changed = pyqtSignal(bool)
+    pip_geometry_live_changed = pyqtSignal(str)
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -151,6 +153,8 @@ class PreviewWidget(QWidget):
         self._last_req_time = 0.0
         self._pixmap: QPixmap | None = None
         self._audio_clip_id: str | None = None
+        self._pip_edit_mode: bool = False
+        self._pip_drag: dict | None = None
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -162,9 +166,11 @@ class PreviewWidget(QWidget):
         self._audio_output.setVolume(1.0)
 
         self.setMinimumSize(320, 200)
+        self.setMouseTracking(True)
         self._emitter_sig = _emitter.frame_ready
         self._emitter_sig.connect(self._on_frame)
         self.controller.timeline_changed.connect(self._on_timeline_updated)
+        self.controller.selection_changed.connect(lambda _ids: self.update())
 
     def _on_timeline_updated(self):
         cap = self.controller.project.duration()
@@ -521,25 +527,264 @@ class PreviewWidget(QWidget):
             p.drawText(self.width() - 90, self.height() - 10,
                        fmt_timecode(dur, self.controller.project.fps, compact=True))
 
+        # Picture-in-Picture (PiP) interactive bounding boxes & handles
+        if not getattr(self, "_eraser_mode", False):
+            self._draw_pip_overlay(p)
+
         # Magic Eraser brush overlay
         if getattr(self, "_eraser_mode", False):
             self._draw_eraser_overlay(p)
 
+    def set_pip_edit_mode(self, enabled: bool):
+        if self._pip_edit_mode == enabled:
+            return
+        self._pip_edit_mode = enabled
+        if enabled and getattr(self, "_eraser_mode", False):
+            self._eraser_mode = False
+        self.setMouseTracking(True)
+        self.pip_mode_changed.emit(enabled)
+        self.update()
+
+    def is_pip_edit_mode(self) -> bool:
+        return self._pip_edit_mode
+
+    def _video_viewport_rect(self) -> tuple[float, float, float, float]:
+        cw, ch = self.width(), self.height()
+        pw = self.controller.project.width or 1920
+        ph = self.controller.project.height or 1080
+        scale = min(cw / max(pw, 1), ch / max(ph, 1))
+        vw, vh = pw * scale, ph * scale
+        vx0, vy0 = (cw - vw) * 0.5, (ch - vh) * 0.5
+        return vx0, vy0, max(vw, 1.0), max(vh, 1.0)
+
+    def _clip_screen_rect(self, clip) -> QRectF:
+        vx0, vy0, vw, vh = self._video_viewport_rect()
+        px = float(getattr(clip, "pip_x", 0.0))
+        py = float(getattr(clip, "pip_y", 0.0))
+        pw = float(getattr(clip, "pip_w", 1.0))
+        ph = float(getattr(clip, "pip_h", 1.0))
+        return QRectF(vx0 + px * vw, vy0 + py * vh, pw * vw, ph * vh)
+
+    @staticmethod
+    def _pip_handles_for_rect(r: QRectF, hs: float = 9.0) -> dict[str, QRectF]:
+        hh = hs * 0.5
+        x0, y0, w, h = r.x(), r.y(), r.width(), r.height()
+        xm, ym = x0 + w * 0.5, y0 + h * 0.5
+        x1, y1 = x0 + w, y0 + h
+        return {
+            "nw": QRectF(x0 - hh, y0 - hh, hs, hs),
+            "n":  QRectF(xm - hh, y0 - hh, hs, hs),
+            "ne": QRectF(x1 - hh, y0 - hh, hs, hs),
+            "e":  QRectF(x1 - hh, ym - hh, hs, hs),
+            "se": QRectF(x1 - hh, y1 - hh, hs, hs),
+            "s":  QRectF(xm - hh, y1 - hh, hs, hs),
+            "sw": QRectF(x0 - hh, y1 - hh, hs, hs),
+            "w":  QRectF(x0 - hh, ym - hh, hs, hs),
+        }
+
+    def _is_pip_interactive(self, active_clips: list) -> bool:
+        if self._pip_edit_mode:
+            return True
+        if len(active_clips) > 1:
+            return True
+        return any(getattr(c, "has_custom_pip", False) or c.track_index > 0 for c in active_clips)
+
+    def _draw_pip_overlay(self, p: QPainter):
+        active_clips = [
+            c for c in self.controller.project.video_clips_at(self._time)
+            if self.controller.project.clip_media(c) and self.controller.project.clip_media(c).has_video
+        ]
+        if not active_clips or not self._is_pip_interactive(active_clips):
+            return
+
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        selected_ids = set(self.controller._selected)
+        active_selected = next((c for c in reversed(active_clips) if c.id in selected_ids), None)
+        if active_selected is None:
+            active_selected = active_clips[-1]
+
+        for c in active_clips:
+            is_sel = (c.id == active_selected.id)
+            if not self._pip_edit_mode and not is_sel and not getattr(c, "has_custom_pip", False) and c.track_index == 0:
+                continue
+
+            rect = self._clip_screen_rect(c)
+            role_label = tr("Main Screen") if c.track_index == 0 else tr("Sub Screen")
+            track_tag = f"V{c.track_index + 1}"
+            w_pct = int(round(getattr(c, "pip_w", 1.0) * 100))
+            h_pct = int(round(getattr(c, "pip_h", 1.0) * 100))
+            badge_text = f"{role_label} ({track_tag}) {w_pct}%×{h_pct}%"
+
+            if is_sel:
+                pen = QPen(QColor(0, 229, 255, 235), 2.0, Qt.PenStyle.SolidLine)
+                badge_bg = QColor(0, 150, 190, 220)
+            else:
+                pen = QPen(QColor(255, 175, 40, 185), 1.5, Qt.PenStyle.DashLine)
+                badge_bg = QColor(160, 100, 20, 200)
+
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(pen)
+            p.drawRect(rect)
+
+            font = QFont("Helvetica", 8, QFont.Weight.Bold)
+            p.setFont(font)
+            fm = p.fontMetrics()
+            tw = fm.horizontalAdvance(badge_text)
+            th = fm.height()
+            bx = max(4.0, min(rect.x() + 4.0, self.width() - tw - 16.0))
+            by = max(4.0, min(rect.y() + 4.0, self.height() - th - 10.0))
+            p.fillRect(QRectF(bx, by, tw + 10, th + 4), badge_bg)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(QRectF(bx + 5, by + 2, tw, th), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, badge_text)
+
+            if is_sel:
+                handles = self._pip_handles_for_rect(rect)
+                p.setBrush(QBrush(QColor(0, 229, 255)))
+                p.setPen(QPen(QColor(15, 20, 25), 1.2))
+                for hrect in handles.values():
+                    p.drawRect(hrect)
+
+        if self._pip_edit_mode:
+            hint = f"🖼️ {tr('PiP Edit Mode: Drag frame to move, drag corners/edges to resize, click to switch Main/Sub screen')}"
+            p.setFont(QFont("Helvetica", 9, QFont.Weight.Bold))
+            fm = p.fontMetrics()
+            tw = fm.horizontalAdvance(hint)
+            p.fillRect(QRectF(10, 10, tw + 16, 24), QColor(20, 110, 150, 220))
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(QRectF(18, 12, tw, 20), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, hint)
+
     def set_eraser_mode(self, enabled: bool, radius: int = 25):
         self._eraser_mode = enabled
+        if enabled and self._pip_edit_mode:
+            self._pip_edit_mode = False
+            self.pip_mode_changed.emit(False)
         self._brush_radius = radius
-        self.setMouseTracking(enabled)
+        self.setMouseTracking(True)
         self.update()
 
     def mousePressEvent(self, e):
         if getattr(self, "_eraser_mode", False) and e.button() == Qt.MouseButton.LeftButton:
             self._apply_eraser_stroke(e.position())
+            return
+
+        if e.button() == Qt.MouseButton.LeftButton:
+            active_clips = [
+                c for c in self.controller.project.video_clips_at(self._time)
+                if self.controller.project.clip_media(c) and self.controller.project.clip_media(c).has_video
+            ]
+            if active_clips and self._is_pip_interactive(active_clips):
+                pos = e.position()
+                selected_ids = set(self.controller._selected)
+                active_selected = next((c for c in reversed(active_clips) if c.id in selected_ids), active_clips[-1])
+
+                # 1. Check resize handles on active_selected clip first
+                if active_selected is not None:
+                    s_rect = self._clip_screen_rect(active_selected)
+                    for h_name, h_rect in self._pip_handles_for_rect(s_rect, hs=12.0).items():
+                        if h_rect.contains(pos):
+                            self.controller.set_selection([active_selected.id])
+                            self._pip_drag = {
+                                "clip_id": active_selected.id,
+                                "mode": h_name,
+                                "start_pos": pos,
+                                "orig": (
+                                    float(getattr(active_selected, "pip_x", 0.0)),
+                                    float(getattr(active_selected, "pip_y", 0.0)),
+                                    float(getattr(active_selected, "pip_w", 1.0)),
+                                    float(getattr(active_selected, "pip_h", 1.0)),
+                                ),
+                            }
+                            self.update()
+                            return
+
+                # 2. If active_selected is clicked inside, or check topmost clip containing pos
+                hit_clip = None
+                for c in reversed(active_clips):
+                    if self._clip_screen_rect(c).contains(pos):
+                        hit_clip = c
+                        break
+
+                if hit_clip is not None:
+                    self.controller.set_selection([hit_clip.id])
+                    # Also check if a handle on hit_clip was clicked
+                    h_mode = "move"
+                    for h_name, h_rect in self._pip_handles_for_rect(self._clip_screen_rect(hit_clip), hs=12.0).items():
+                        if h_rect.contains(pos):
+                            h_mode = h_name
+                            break
+                    self._pip_drag = {
+                        "clip_id": hit_clip.id,
+                        "mode": h_mode,
+                        "start_pos": pos,
+                        "orig": (
+                            float(getattr(hit_clip, "pip_x", 0.0)),
+                            float(getattr(hit_clip, "pip_y", 0.0)),
+                            float(getattr(hit_clip, "pip_w", 1.0)),
+                            float(getattr(hit_clip, "pip_h", 1.0)),
+                        ),
+                    }
+                    self.update()
+                    return
 
     def mouseMoveEvent(self, e):
         if getattr(self, "_eraser_mode", False):
             self._mouse_pos = e.position()
             if e.buttons() & Qt.MouseButton.LeftButton:
                 self._apply_eraser_stroke(e.position())
+            self.update()
+            return
+
+        if self._pip_drag is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            c = self.controller.project.clip_by_id(self._pip_drag["clip_id"])
+            if c is None:
+                self._pip_drag = None
+                return
+            _, _, vw, vh = self._video_viewport_rect()
+            dx = (e.position().x() - self._pip_drag["start_pos"].x()) / vw
+            dy = (e.position().y() - self._pip_drag["start_pos"].y()) / vh
+            ox, oy, ow, oh = self._pip_drag["orig"]
+            mode = self._pip_drag["mode"]
+            nx, ny, nw, nh = ox, oy, ow, oh
+            min_s = 0.08
+
+            if mode == "move":
+                nx = max(-0.9, min(0.98, ox + dx))
+                ny = max(-0.9, min(0.98, oy + dy))
+            else:
+                if "e" in mode:
+                    nw = max(min_s, min(2.0, ow + dx))
+                if "s" in mode:
+                    nh = max(min_s, min(2.0, oh + dy))
+                if "w" in mode:
+                    max_dx = ow - min_s
+                    clamped_dx = min(dx, max_dx)
+                    nx = ox + clamped_dx
+                    nw = max(min_s, ow - clamped_dx)
+                if "n" in mode:
+                    max_dy = oh - min_s
+                    clamped_dy = min(dy, max_dy)
+                    ny = oy + clamped_dy
+                    nh = max(min_s, oh - clamped_dy)
+
+            c.pip_x, c.pip_y, c.pip_w, c.pip_h = nx, ny, nw, nh
+            self._request_frame(force=True)
+            self.pip_geometry_live_changed.emit(c.id)
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        if self._pip_drag is not None and e.button() == Qt.MouseButton.LeftButton:
+            drag = self._pip_drag
+            self._pip_drag = None
+            c = self.controller.project.clip_by_id(drag["clip_id"])
+            if c is not None:
+                nx, ny, nw, nh = c.pip_x, c.pip_y, c.pip_w, c.pip_h
+                ox, oy, ow, oh = drag["orig"]
+                # Restore original before pushing undo command so undo works cleanly
+                c.pip_x, c.pip_y, c.pip_w, c.pip_h = ox, oy, ow, oh
+                if any(abs(a - b) > 1e-4 for a, b in zip((nx, ny, nw, nh), (ox, oy, ow, oh))):
+                    self.controller.set_clip_pip_geometry(
+                        c.id, pip_x=nx, pip_y=ny, pip_w=nw, pip_h=nh
+                    )
             self.update()
 
     def _apply_eraser_stroke(self, pos):

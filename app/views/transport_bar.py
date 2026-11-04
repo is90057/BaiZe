@@ -20,6 +20,8 @@ class TransportBar(QWidget):
     split_pressed = pyqtSignal()
     cut_pressed = pyqtSignal()
     range_mode_toggled = pyqtSignal(bool)
+    pip_mode_toggled = pyqtSignal(bool)
+    pip_swap_pressed = pyqtSignal()
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -135,6 +137,21 @@ class TransportBar(QWidget):
         self.btn_cut.clicked.connect(self.cut_pressed)
         lay.addWidget(self.btn_cut)
 
+        lay.addWidget(self._vsep())
+
+        self.btn_pip_mode = QToolButton()
+        self.btn_pip_mode.setText(f"🖼️ {tr('PiP Layout')}")
+        self.btn_pip_mode.setCheckable(True)
+        self.btn_pip_mode.setToolTip(tr("Toggle Picture-in-Picture Interactive Edit Mode"))
+        self.btn_pip_mode.toggled.connect(self.pip_mode_toggled)
+        lay.addWidget(self.btn_pip_mode)
+
+        self.btn_pip_swap = QToolButton()
+        self.btn_pip_swap.setText(f"🔄 {tr('Swap PiP')}")
+        self.btn_pip_swap.setToolTip(tr("Swap Main Screen and Sub Screen"))
+        self.btn_pip_swap.clicked.connect(self.pip_swap_pressed)
+        lay.addWidget(self.btn_pip_swap)
+
         self.setObjectName("transport")
         self._playing = False
 
@@ -174,6 +191,10 @@ class TransportBar(QWidget):
         self.btn_split.setToolTip(tr("Split at Playhead  (Ctrl+B)"))
         self.btn_cut.setText(f"✂️ {tr('Cut')}")
         self.btn_cut.setToolTip(tr("Cut Selected Segment (Video & Audio)  (Ctrl+X)"))
+        self.btn_pip_mode.setText(f"🖼️ {tr('PiP Layout')}")
+        self.btn_pip_mode.setToolTip(tr("Toggle Picture-in-Picture Interactive Edit Mode"))
+        self.btn_pip_swap.setText(f"🔄 {tr('Swap PiP')}")
+        self.btn_pip_swap.setToolTip(tr("Swap Main Screen and Sub Screen"))
         self._update_marks_text()
 
     def set_playing(self, playing: bool):

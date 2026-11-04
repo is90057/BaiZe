@@ -65,7 +65,23 @@ class TimelineClip:
     focus_mode: str = "none"      # "none" | "gaussian_blur" | "center_focus" | "tilt_shift"
     object_removal_enabled: bool = False
     object_removal_masks: list[dict] = field(default_factory=list)
+    pip_x: float = 0.0            # normalized top-left X (-1.0 ~ 1.0, default 0.0)
+    pip_y: float = 0.0            # normalized top-left Y (-1.0 ~ 1.0, default 0.0)
+    pip_w: float = 1.0            # normalized width (0.05 ~ 2.0, default 1.0)
+    pip_h: float = 1.0            # normalized height (0.05 ~ 2.0, default 1.0)
+    pip_border_width: int = 0     # border thickness in px (0 ~ 20)
+    pip_border_color: str = "#FFFFFF"
     id: str = field(default_factory=new_id)
+
+    @property
+    def has_custom_pip(self) -> bool:
+        return (
+            abs(self.pip_x) > 1e-4
+            or abs(self.pip_y) > 1e-4
+            or abs(self.pip_w - 1.0) > 1e-4
+            or abs(self.pip_h - 1.0) > 1e-4
+            or self.pip_border_width > 0
+        )
 
     @property
     def end(self) -> float:

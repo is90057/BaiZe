@@ -159,7 +159,13 @@ class Project:
                  "blur_amount": getattr(c, "blur_amount", 0.0),
                  "focus_mode": getattr(c, "focus_mode", "none"),
                  "object_removal_enabled": getattr(c, "object_removal_enabled", False),
-                 "object_removal_masks": getattr(c, "object_removal_masks", [])}
+                 "object_removal_masks": getattr(c, "object_removal_masks", []),
+                 "pip_x": getattr(c, "pip_x", 0.0),
+                 "pip_y": getattr(c, "pip_y", 0.0),
+                 "pip_w": getattr(c, "pip_w", 1.0),
+                 "pip_h": getattr(c, "pip_h", 1.0),
+                 "pip_border_width": getattr(c, "pip_border_width", 0),
+                 "pip_border_color": getattr(c, "pip_border_color", "#FFFFFF")}
                 for c in t.clips
             ],
         }
@@ -220,6 +226,12 @@ class Project:
                 focus_mode=cd.get("focus_mode", "none"),
                 object_removal_enabled=cd.get("object_removal_enabled", False),
                 object_removal_masks=cd.get("object_removal_masks", []),
+                pip_x=float(cd.get("pip_x", 0.0)),
+                pip_y=float(cd.get("pip_y", 0.0)),
+                pip_w=float(cd.get("pip_w", 1.0)),
+                pip_h=float(cd.get("pip_h", 1.0)),
+                pip_border_width=int(cd.get("pip_border_width", 0)),
+                pip_border_color=str(cd.get("pip_border_color", "#FFFFFF")),
                 id=cd.get("id", new_id())
             )
             t.clips.append(c)

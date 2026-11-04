@@ -1,13 +1,28 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QFormLayout, QLabel, QLineEdit, QSlider,
+    QWidget, QVBoxLayout, QFormLayout, QGridLayout, QLabel, QLineEdit, QSlider,
     QDoubleSpinBox, QGroupBox, QComboBox, QScrollArea, QPushButton,
     QSpinBox, QCheckBox, QHBoxLayout, QPlainTextEdit, QColorDialog,
 )
 
 from ..i18n import tr
+
+PIP_LAYOUT_PRESETS = [
+    ("pip_br", "Corner PiP: Bottom-Right"),
+    ("pip_bl", "Corner PiP: Bottom-Left"),
+    ("pip_tr", "Corner PiP: Top-Right"),
+    ("pip_tl", "Corner PiP: Top-Left"),
+    ("side_by_side", "Side by Side 50/50 (Main Left / Sub Right)"),
+    ("side_by_side_swap", "Side by Side 50/50 (Sub Left / Main Right)"),
+    ("main_left_70", "Left Main 70% + Right Sub 30%"),
+    ("main_right_70", "Left Sub 30% + Right Main 70%"),
+    ("top_bottom", "Top & Bottom Split 50/50"),
+    ("floating_dual", "Floating Dual Windows"),
+    ("reset_full", "Reset Full Screen (100%)"),
+]
 
 TRANSITION_TYPES = [
     ("fade", "Fade / Crossfade"),
@@ -131,6 +146,149 @@ class InspectorPanel(QWidget):
         self.group.setLayout(self._form)
         self.group.setVisible(False)
         lay.addWidget(self.group)
+
+        # Picture-in-Picture (PiP / 子母畫面與版面排列) Group
+        self.pip_group = QGroupBox(f"🖼️ {tr('Picture-in-Picture & Layout')}")
+        self._pip_form = QFormLayout(self.pip_group)
+        self._pip_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.pip_role_lbl = QLabel("-")
+        self.pip_role_lbl.setStyleSheet("color: #4dd0e1; font-weight: bold;")
+        self._label_pip_role = QLabel(tr("Current Target"))
+        self._pip_form.addRow(self._label_pip_role, self.pip_role_lbl)
+
+        target_switch_lay = QHBoxLayout()
+        self.pip_sel_main_btn = QPushButton(f"🎯 {tr('Select Main (V1)')}")
+        self.pip_sel_main_btn.clicked.connect(lambda: self._select_pip_role(is_sub=False))
+        target_switch_lay.addWidget(self.pip_sel_main_btn)
+
+        self.pip_sel_sub_btn = QPushButton(f"🎯 {tr('Select Sub (V2)')}")
+        self.pip_sel_sub_btn.clicked.connect(lambda: self._select_pip_role(is_sub=True))
+        target_switch_lay.addWidget(self.pip_sel_sub_btn)
+        self._pip_form.addRow(target_switch_lay)
+
+        role_action_lay = QHBoxLayout()
+        self.pip_set_sub_btn = QPushButton(f"🖼️ {tr('Set as Sub Screen')}")
+        self.pip_set_sub_btn.clicked.connect(self._on_set_as_sub_screen)
+        role_action_lay.addWidget(self.pip_set_sub_btn)
+
+        self.pip_set_main_btn = QPushButton(f"⬇️ {tr('Set as Main Screen')}")
+        self.pip_set_main_btn.clicked.connect(self._on_set_as_main_screen)
+        role_action_lay.addWidget(self.pip_set_main_btn)
+        self._pip_form.addRow(role_action_lay)
+
+        self.pip_swap_btn = QPushButton(f"🔄 {tr('Swap Main and Sub Screens')}")
+        self.pip_swap_btn.setStyleSheet(
+            "QPushButton { background: #2c5d8a; color: #ffffff; font-weight: bold; padding: 4px 8px; border-radius: 4px; }"
+            "QPushButton:hover { background: #3672a8; }"
+        )
+        self.pip_swap_btn.clicked.connect(self._on_swap_pip_screens)
+        self._pip_form.addRow(self.pip_swap_btn)
+
+        self.pip_interactive_btn = QPushButton(f"🖱️ {tr('Interactive Drag/Resize in Preview')}")
+        self.pip_interactive_btn.setCheckable(True)
+        self.pip_interactive_btn.setStyleSheet(
+            "QPushButton { background: #2b4c5e; color: #e6f7ff; font-weight: bold; padding: 5px 8px; border-radius: 4px; }"
+            "QPushButton:checked { background: #00838f; color: #ffffff; border: 1px solid #4dd0e1; }"
+        )
+        self.pip_interactive_btn.toggled.connect(self._on_toggle_pip_interactive)
+        self._pip_form.addRow(self.pip_interactive_btn)
+
+        preset_row = QHBoxLayout()
+        self.pip_preset_combo = QComboBox()
+        for p_id, p_label in PIP_LAYOUT_PRESETS:
+            self.pip_preset_combo.addItem(tr(p_label), p_id)
+        preset_row.addWidget(self.pip_preset_combo, 1)
+        self.pip_apply_preset_btn = QPushButton(tr("Apply Layout"))
+        self.pip_apply_preset_btn.clicked.connect(self._on_apply_pip_preset)
+        preset_row.addWidget(self.pip_apply_preset_btn)
+        self._label_pip_preset = QLabel(tr("Layout Preset"))
+        self._pip_form.addRow(self._label_pip_preset, preset_row)
+
+        self.pip_scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.pip_scale_slider.setRange(10, 150)
+        self.pip_scale_slider.setValue(100)
+        self.pip_scale_slider.valueChanged.connect(self._on_pip_scale_slider)
+        self._label_pip_scale = QLabel(tr("Uniform Scale (%)"))
+        self._pip_form.addRow(self._label_pip_scale, self.pip_scale_slider)
+
+        scale_quick_lay = QHBoxLayout()
+        for sc_pct in (25, 35, 50, 75, 100):
+            sbtn = QPushButton(f"{sc_pct}%")
+            sbtn.clicked.connect(lambda _, v=sc_pct: self._set_pip_uniform_scale(v / 100.0))
+            scale_quick_lay.addWidget(sbtn)
+        self._pip_form.addRow(scale_quick_lay)
+
+        self.pip_w_spin = QDoubleSpinBox()
+        self.pip_w_spin.setDecimals(1)
+        self.pip_w_spin.setRange(5.0, 200.0)
+        self.pip_w_spin.setSingleStep(2.0)
+        self.pip_w_spin.setSuffix(" %")
+        self.pip_w_spin.valueChanged.connect(self.commit_pip_geometry)
+        self._label_pip_w = QLabel(tr("Width (%)"))
+        self._pip_form.addRow(self._label_pip_w, self.pip_w_spin)
+
+        self.pip_h_spin = QDoubleSpinBox()
+        self.pip_h_spin.setDecimals(1)
+        self.pip_h_spin.setRange(5.0, 200.0)
+        self.pip_h_spin.setSingleStep(2.0)
+        self.pip_h_spin.setSuffix(" %")
+        self.pip_h_spin.valueChanged.connect(self.commit_pip_geometry)
+        self._label_pip_h = QLabel(tr("Height (%)"))
+        self._pip_form.addRow(self._label_pip_h, self.pip_h_spin)
+
+        self.pip_x_spin = QDoubleSpinBox()
+        self.pip_x_spin.setDecimals(1)
+        self.pip_x_spin.setRange(-100.0, 100.0)
+        self.pip_x_spin.setSingleStep(2.0)
+        self.pip_x_spin.setSuffix(" %")
+        self.pip_x_spin.valueChanged.connect(self.commit_pip_geometry)
+        self._label_pip_x = QLabel(tr("Position X (%)"))
+        self._pip_form.addRow(self._label_pip_x, self.pip_x_spin)
+
+        self.pip_y_spin = QDoubleSpinBox()
+        self.pip_y_spin.setDecimals(1)
+        self.pip_y_spin.setRange(-100.0, 100.0)
+        self.pip_y_spin.setSingleStep(2.0)
+        self.pip_y_spin.setSuffix(" %")
+        self.pip_y_spin.valueChanged.connect(self.commit_pip_geometry)
+        self._label_pip_y = QLabel(tr("Position Y (%)"))
+        self._pip_form.addRow(self._label_pip_y, self.pip_y_spin)
+
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(3)
+        align_positions = [
+            ("↖", 0, 0, "tl"), ("↑", 0, 1, "tc"), ("↗", 0, 2, "tr"),
+            ("←", 1, 0, "ml"), ("•", 1, 1, "mc"), ("→", 1, 2, "mr"),
+            ("↙", 2, 0, "bl"), ("↓", 2, 1, "bc"), ("↘", 2, 2, "br"),
+        ]
+        for sym, r_i, c_i, code in align_positions:
+            abtn = QPushButton(sym)
+            abtn.setFixedHeight(24)
+            abtn.clicked.connect(lambda _, k=code: self._align_pip_position(k))
+            grid.addWidget(abtn, r_i, c_i)
+        self._label_pip_align = QLabel(tr("Quick Position"))
+        self._pip_form.addRow(self._label_pip_align, grid_widget)
+
+        border_lay = QHBoxLayout()
+        self.pip_border_spin = QSpinBox()
+        self.pip_border_spin.setRange(0, 25)
+        self.pip_border_spin.setSuffix(" px")
+        self.pip_border_spin.valueChanged.connect(self.commit_pip_geometry)
+        border_lay.addWidget(self.pip_border_spin)
+
+        self.pip_border_color_btn = QPushButton("#FFFFFF")
+        self.pip_border_color_btn.clicked.connect(self._pick_pip_border_color)
+        border_lay.addWidget(self.pip_border_color_btn)
+        self._label_pip_border = QLabel(tr("Border"))
+        self._pip_form.addRow(self._label_pip_border, border_lay)
+
+        self.pip_group.setLayout(self._pip_form)
+        self.pip_group.setVisible(False)
+        lay.addWidget(self.pip_group)
 
         # Transitions Group
         self.trans_group = QGroupBox(tr("Transitions"))
@@ -501,6 +659,26 @@ class InspectorPanel(QWidget):
         self.focus_mode_combo.setItemText(3, tr("Tilt Shift Focus"))
         self._label_blur_amt.setText(tr("Blur Intensity"))
 
+        self.pip_group.setTitle(f"🖼️ {tr('Picture-in-Picture & Layout')}")
+        self._label_pip_role.setText(tr("Current Target"))
+        self.pip_sel_main_btn.setText(f"🎯 {tr('Select Main (V1)')}")
+        self.pip_sel_sub_btn.setText(f"🎯 {tr('Select Sub (V2)')}")
+        self.pip_set_sub_btn.setText(f"🖼️ {tr('Set as Sub Screen')}")
+        self.pip_set_main_btn.setText(f"⬇️ {tr('Set as Main Screen')}")
+        self.pip_swap_btn.setText(f"🔄 {tr('Swap Main and Sub Screens')}")
+        self.pip_interactive_btn.setText(f"🖱️ {tr('Interactive Drag/Resize in Preview')}")
+        self._label_pip_preset.setText(tr("Layout Preset"))
+        self.pip_apply_preset_btn.setText(tr("Apply Layout"))
+        for idx, (p_id, p_label) in enumerate(PIP_LAYOUT_PRESETS):
+            self.pip_preset_combo.setItemText(idx, tr(p_label))
+        self._label_pip_scale.setText(tr("Uniform Scale (%)"))
+        self._label_pip_w.setText(tr("Width (%)"))
+        self._label_pip_h.setText(tr("Height (%)"))
+        self._label_pip_x.setText(tr("Position X (%)"))
+        self._label_pip_y.setText(tr("Position Y (%)"))
+        self._label_pip_align.setText(tr("Quick Position"))
+        self._label_pip_border.setText(tr("Border"))
+
         self.reload()
         self.stats.setText(self._project_stats())
 
@@ -511,6 +689,7 @@ class InspectorPanel(QWidget):
             self._clip_id = None
             if not getattr(self, "_sub_id", None):
                 self.group.setVisible(False)
+                self.pip_group.setVisible(False)
                 self.trans_group.setVisible(False)
                 self.ck_group.setVisible(False)
                 self.speed_group.setVisible(False)
@@ -538,6 +717,7 @@ class InspectorPanel(QWidget):
         self.controller.clear_selection()
         self._sub_id = sub_id
         self.group.setVisible(False)
+        self.pip_group.setVisible(False)
         self.trans_group.setVisible(False)
         self.ck_group.setVisible(False)
         self.speed_group.setVisible(False)
@@ -599,6 +779,7 @@ class InspectorPanel(QWidget):
         if fx_idx >= 0:
             self.video_fx_combo.setCurrentIndex(fx_idx)
 
+        self.pip_group.setVisible(is_video)
         self.trans_group.setVisible(is_video)
         self.ck_group.setVisible(is_video)
         self.speed_group.setVisible(c is not None)
@@ -607,6 +788,25 @@ class InspectorPanel(QWidget):
         self.obj_removal_group.setVisible(is_video)
 
         if is_video:
+            role_name = tr("Main Screen") if c.track_index == 0 else tr("Sub Screen")
+            self.pip_role_lbl.setText(f"{role_name} (V{c.track_index + 1}) — {c.name}")
+            pw_pct = float(getattr(c, "pip_w", 1.0)) * 100.0
+            ph_pct = float(getattr(c, "pip_h", 1.0)) * 100.0
+            px_pct = float(getattr(c, "pip_x", 0.0)) * 100.0
+            py_pct = float(getattr(c, "pip_y", 0.0)) * 100.0
+            self.pip_w_spin.setValue(pw_pct)
+            self.pip_h_spin.setValue(ph_pct)
+            self.pip_x_spin.setValue(px_pct)
+            self.pip_y_spin.setValue(py_pct)
+            self.pip_scale_slider.setValue(max(10, min(150, int(round((pw_pct + ph_pct) * 0.5)))))
+            self.pip_border_spin.setValue(int(getattr(c, "pip_border_width", 0)))
+            self.pip_border_color_btn.setText(str(getattr(c, "pip_border_color", "#FFFFFF")))
+
+            main_win = self.window()
+            preview = getattr(main_win, "preview", None)
+            if preview is not None and hasattr(preview, "is_pip_edit_mode"):
+                self.pip_interactive_btn.setChecked(preview.is_pip_edit_mode())
+
             in_idx = self.in_type_combo.findData(c.fade_in_type)
             if in_idx >= 0:
                 self.in_type_combo.setCurrentIndex(in_idx)
@@ -736,8 +936,6 @@ class InspectorPanel(QWidget):
         )
 
     def _pick_sub_color(self):
-        from PyQt6.QtWidgets import QColorDialog
-        from PyQt6.QtGui import QColor
         if not getattr(self, "_sub_id", None):
             return
         sub = self.controller.project.subtitle_by_id(self._sub_id)
@@ -749,8 +947,6 @@ class InspectorPanel(QWidget):
             self.controller.update_subtitle(self._sub_id, font_color=hex_str)
 
     def _pick_sub_bg(self):
-        from PyQt6.QtWidgets import QColorDialog
-        from PyQt6.QtGui import QColor
         if not getattr(self, "_sub_id", None):
             return
         sub = self.controller.project.subtitle_by_id(self._sub_id)
@@ -760,6 +956,119 @@ class InspectorPanel(QWidget):
             hex_str = color.name().upper() + "80"
             self.sub_bg_btn.setText(hex_str)
             self.controller.update_subtitle(self._sub_id, bg_color=hex_str)
+
+    def commit_pip_geometry(self, *args):
+        if self._loading:
+            return
+        c = self._clip()
+        if c and self.kind_of(c) == "video":
+            self.controller.set_clip_pip_geometry(
+                c.id,
+                pip_x=float(self.pip_x_spin.value()) / 100.0,
+                pip_y=float(self.pip_y_spin.value()) / 100.0,
+                pip_w=float(self.pip_w_spin.value()) / 100.0,
+                pip_h=float(self.pip_h_spin.value()) / 100.0,
+                border_width=int(self.pip_border_spin.value()),
+                border_color=self.pip_border_color_btn.text(),
+            )
+
+    def _on_pip_scale_slider(self, val: int):
+        if self._loading:
+            return
+        self._set_pip_uniform_scale(val / 100.0)
+
+    def _set_pip_uniform_scale(self, scale: float):
+        c = self._clip()
+        if not c or self.kind_of(c) != "video":
+            return
+        scale = max(0.05, min(2.0, float(scale)))
+        old_w = float(getattr(c, "pip_w", 1.0))
+        old_h = float(getattr(c, "pip_h", 1.0))
+        old_x = float(getattr(c, "pip_x", 0.0))
+        old_y = float(getattr(c, "pip_y", 0.0))
+        cx = old_x + old_w * 0.5
+        cy = old_y + old_h * 0.5
+        nx = max(0.0, min(1.0 - scale, cx - scale * 0.5)) if scale <= 1.0 else (1.0 - scale) * 0.5
+        ny = max(0.0, min(1.0 - scale, cy - scale * 0.5)) if scale <= 1.0 else (1.0 - scale) * 0.5
+        self.controller.set_clip_pip_geometry(c.id, pip_x=nx, pip_y=ny, pip_w=scale, pip_h=scale)
+
+    def _align_pip_position(self, code: str):
+        c = self._clip()
+        if not c or self.kind_of(c) != "video":
+            return
+        w = float(getattr(c, "pip_w", 1.0))
+        h = float(getattr(c, "pip_h", 1.0))
+        pad = 0.03 if (w < 0.95 or h < 0.95) else 0.0
+        if "l" in code:
+            nx = pad
+        elif "r" in code:
+            nx = max(0.0, 1.0 - w - pad)
+        else:
+            nx = (1.0 - w) * 0.5
+
+        if "t" in code:
+            ny = pad
+        elif "b" in code:
+            ny = max(0.0, 1.0 - h - pad)
+        else:
+            ny = (1.0 - h) * 0.5
+        self.controller.set_clip_pip_geometry(c.id, pip_x=nx, pip_y=ny)
+
+    def _pick_pip_border_color(self):
+        c = self._clip()
+        curr_hex = getattr(c, "pip_border_color", "#FFFFFF") if c else "#FFFFFF"
+        color = QColorDialog.getColor(QColor(curr_hex), self, tr("Border Color"))
+        if color.isValid():
+            hex_str = color.name().upper()
+            self.pip_border_color_btn.setText(hex_str)
+            self.commit_pip_geometry()
+
+    def _playhead_time(self) -> float:
+        main_win = self.window()
+        timeline = getattr(main_win, "timeline", None)
+        if timeline is not None:
+            return float(timeline.playhead)
+        c = self._clip()
+        return c.position if c else 0.0
+
+    def _select_pip_role(self, is_sub: bool):
+        t = self._playhead_time()
+        main_c, sub_c = self.controller.find_pip_pair_at(t)
+        target = sub_c if is_sub else main_c
+        if target is None:
+            tracks = self.controller.project.video_tracks[1:] if is_sub else self.controller.project.video_tracks[:1]
+            for tr in tracks:
+                if tr.clips:
+                    target = tr.clips[0]
+                    break
+        if target is not None:
+            self.controller.set_selection([target.id])
+
+    def _on_set_as_sub_screen(self):
+        c = self._clip()
+        if c:
+            self.controller.set_clip_as_sub_screen(c.id)
+
+    def _on_set_as_main_screen(self):
+        c = self._clip()
+        if c:
+            self.controller.set_clip_as_main_screen(c.id)
+
+    def _on_swap_pip_screens(self):
+        self.controller.swap_pip_screens(self._playhead_time())
+
+    def _on_toggle_pip_interactive(self, checked: bool):
+        main_win = self.window()
+        preview = getattr(main_win, "preview", None)
+        if preview is not None and hasattr(preview, "set_pip_edit_mode"):
+            preview.set_pip_edit_mode(checked)
+
+    def _on_apply_pip_preset(self):
+        preset_id = self.pip_preset_combo.currentData()
+        if preset_id:
+            self.controller.apply_pip_layout_preset(
+                preset_id, time=self._playhead_time(), target_clip_id=self._clip_id
+            )
 
     def commit_chroma_key(self, *args):
         if self._loading:
@@ -775,8 +1084,6 @@ class InspectorPanel(QWidget):
             )
 
     def _pick_ck_color(self):
-        from PyQt6.QtWidgets import QColorDialog
-        from PyQt6.QtGui import QColor
         c = self._clip()
         curr_hex = c.chroma_key_color if c else "#00FF00"
         color = QColorDialog.getColor(QColor(curr_hex), self, tr("Key Color"))

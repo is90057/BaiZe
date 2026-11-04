@@ -250,6 +250,250 @@ class ProjectController(QObject):
             return
         self.undo_stack.push(_SetProp(self.project, clip_id, attr, value))
 
+    # ---------- Picture-in-Picture (PiP / 子母畫面) ----------
+    def ensure_video_track(self, min_track_index: int = 1):
+        while len(self.project.video_tracks) <= min_track_index:
+            self.undo_stack.push(_AddVideoTrack(self.project))
+
+    def set_clip_pip_geometry(
+        self,
+        clip_id: str,
+        pip_x: float | None = None,
+        pip_y: float | None = None,
+        pip_w: float | None = None,
+        pip_h: float | None = None,
+        border_width: int | None = None,
+        border_color: str | None = None,
+    ):
+        c = self.project.clip_by_id(clip_id)
+        if c is None:
+            return
+        cmd = _SetPipGeometry(
+            self.project, clip_id,
+            pip_x=pip_x, pip_y=pip_y, pip_w=pip_w, pip_h=pip_h,
+            border_width=border_width, border_color=border_color,
+        )
+        if cmd.has_changes:
+            self.undo_stack.push(cmd)
+
+    def add_pip_clip(self, media: MediaClip, position: float = 0.0, track_index: int = 1) -> TimelineClip:
+        """Add a media asset as a Picture-in-Picture sub-screen on upper video track V2+."""
+        self.undo_stack.beginMacro("Add PiP Clip")
+        self.ensure_video_track(track_index)
+        c = TimelineClip(
+            media_id=media.id,
+            position=max(0.0, position),
+            duration=media.duration,
+            trim_in=0.0,
+            track_index=track_index,
+            name=media.name or media.filepath().stem,
+            pip_x=0.62,
+            pip_y=0.60,
+            pip_w=0.35,
+            pip_h=0.35,
+            pip_border_width=2,
+            pip_border_color="#FFFFFF",
+        )
+        self.undo_stack.push(_AddClip(self.project, c, "video"))
+        self.undo_stack.endMacro()
+        self.set_selection([c.id])
+        return c
+
+    def set_clip_as_sub_screen(self, clip_id: str):
+        """Move clip to upper video track V2+ and apply default sub-screen PiP size if full-screen."""
+        c = self.project.clip_by_id(clip_id)
+        if c is None or self.clip_kind(clip_id) != "video":
+            return
+        self.undo_stack.beginMacro("Set as Sub Screen")
+        target_track = max(1, c.track_index)
+        self.ensure_video_track(target_track)
+        if c.track_index != target_track:
+            self.undo_stack.push(
+                _MoveClip(self.project, clip_id, c.position, c.position, c.track_index, target_track, "video")
+            )
+        if not getattr(c, "has_custom_pip", False):
+            self.undo_stack.push(
+                _SetPipGeometry(
+                    self.project, clip_id,
+                    pip_x=0.62, pip_y=0.60, pip_w=0.35, pip_h=0.35,
+                    border_width=2, border_color=getattr(c, "pip_border_color", "#FFFFFF"),
+                )
+            )
+        self.undo_stack.endMacro()
+        self.timeline_changed.emit()
+
+    def set_clip_as_main_screen(self, clip_id: str):
+        """Move clip to base video track V1 and reset to full-screen main display."""
+        c = self.project.clip_by_id(clip_id)
+        if c is None or self.clip_kind(clip_id) != "video":
+            return
+        self.undo_stack.beginMacro("Set as Main Screen")
+        if c.track_index != 0:
+            self.undo_stack.push(
+                _MoveClip(self.project, clip_id, c.position, c.position, c.track_index, 0, "video")
+            )
+        self.undo_stack.push(
+            _SetPipGeometry(
+                self.project, clip_id,
+                pip_x=0.0, pip_y=0.0, pip_w=1.0, pip_h=1.0, border_width=0,
+            )
+        )
+        self.undo_stack.endMacro()
+        self.timeline_changed.emit()
+
+    def find_pip_pair_at(self, time: float | None = None) -> tuple[TimelineClip | None, TimelineClip | None]:
+        """Return (main_clip, sub_clip) at `time` or from current selection/timeline."""
+        active: list[TimelineClip] = []
+        if time is not None:
+            active = self.project.video_clips_at(time)
+        if len(active) >= 2:
+            return active[0], active[-1]
+
+        sel_video = [c for c in self.selected_clips() if self.clip_kind(c.id) == "video"]
+        if len(sel_video) >= 2:
+            sel_sorted = sorted(sel_video, key=lambda x: x.track_index)
+            return sel_sorted[0], sel_sorted[-1]
+        if len(sel_video) == 1:
+            sc = sel_video[0]
+            mid = sc.position + sc.duration * 0.5
+            at_mid = self.project.video_clips_at(mid)
+            if len(at_mid) >= 2:
+                return at_mid[0], at_mid[-1]
+            if sc.track_index > 0:
+                return None, sc
+            return sc, None
+
+        if len(active) == 1:
+            ac = active[0]
+            if ac.track_index > 0:
+                return None, ac
+            return ac, None
+
+        # Fallback: look for any overlapping pair across tracks
+        if len(self.project.video_tracks) >= 2:
+            base_clips = self.project.video_tracks[0].clips
+            for upper_tr in reversed(self.project.video_tracks[1:]):
+                for uc in upper_tr.clips:
+                    mid = uc.position + uc.duration * 0.5
+                    for bc in base_clips:
+                        if bc.contains(mid):
+                            return bc, uc
+        return None, None
+
+    def swap_pip_screens(self, time: float | None = None) -> bool:
+        """Swap main screen (母畫面) and sub screen (子畫面) tracks and geometries."""
+        main_c, sub_c = self.find_pip_pair_at(time)
+        if main_c is None or sub_c is None or main_c.id == sub_c.id:
+            return False
+
+        m_geom = (
+            getattr(main_c, "pip_x", 0.0),
+            getattr(main_c, "pip_y", 0.0),
+            getattr(main_c, "pip_w", 1.0),
+            getattr(main_c, "pip_h", 1.0),
+            getattr(main_c, "pip_border_width", 0),
+            getattr(main_c, "pip_border_color", "#FFFFFF"),
+        )
+        s_geom = (
+            getattr(sub_c, "pip_x", 0.62),
+            getattr(sub_c, "pip_y", 0.60),
+            getattr(sub_c, "pip_w", 0.35),
+            getattr(sub_c, "pip_h", 0.35),
+            getattr(sub_c, "pip_border_width", 2),
+            getattr(sub_c, "pip_border_color", "#FFFFFF"),
+        )
+        m_track = main_c.track_index
+        s_track = sub_c.track_index
+
+        self.undo_stack.beginMacro("Swap Main and Sub Screens")
+        if m_track != s_track:
+            self.undo_stack.push(
+                _MoveClip(self.project, main_c.id, main_c.position, main_c.position, m_track, s_track, "video")
+            )
+            self.undo_stack.push(
+                _MoveClip(self.project, sub_c.id, sub_c.position, sub_c.position, s_track, m_track, "video")
+            )
+        self.undo_stack.push(
+            _SetPipGeometry(
+                self.project, main_c.id,
+                pip_x=s_geom[0], pip_y=s_geom[1], pip_w=s_geom[2], pip_h=s_geom[3],
+                border_width=s_geom[4], border_color=s_geom[5],
+            )
+        )
+        self.undo_stack.push(
+            _SetPipGeometry(
+                self.project, sub_c.id,
+                pip_x=m_geom[0], pip_y=m_geom[1], pip_w=m_geom[2], pip_h=m_geom[3],
+                border_width=m_geom[4], border_color=m_geom[5],
+            )
+        )
+        self.undo_stack.endMacro()
+        self.timeline_changed.emit()
+        return True
+
+    def apply_pip_layout_preset(
+        self,
+        preset_id: str,
+        time: float | None = None,
+        target_clip_id: str | None = None,
+    ) -> bool:
+        """Apply a layout preset to both main screen (母畫面) and sub screen (子畫面)."""
+        # Preset definitions: preset_id -> (main_box(x,y,w,h,bw), sub_box(x,y,w,h,bw))
+        presets: dict[str, tuple[tuple[float, float, float, float, int], tuple[float, float, float, float, int]]] = {
+            "pip_br": ((0.0, 0.0, 1.0, 1.0, 0), (0.62, 0.60, 0.35, 0.35, 2)),
+            "pip_bl": ((0.0, 0.0, 1.0, 1.0, 0), (0.03, 0.60, 0.35, 0.35, 2)),
+            "pip_tr": ((0.0, 0.0, 1.0, 1.0, 0), (0.62, 0.05, 0.35, 0.35, 2)),
+            "pip_tl": ((0.0, 0.0, 1.0, 1.0, 0), (0.03, 0.05, 0.35, 0.35, 2)),
+            "side_by_side": ((0.0, 0.0, 0.5, 1.0, 1), (0.5, 0.0, 0.5, 1.0, 1)),
+            "side_by_side_swap": ((0.5, 0.0, 0.5, 1.0, 1), (0.0, 0.0, 0.5, 1.0, 1)),
+            "main_left_70": ((0.0, 0.0, 0.70, 1.0, 1), (0.70, 0.20, 0.30, 0.60, 2)),
+            "main_right_70": ((0.30, 0.0, 0.70, 1.0, 1), (0.0, 0.20, 0.30, 0.60, 2)),
+            "top_bottom": ((0.0, 0.0, 1.0, 0.5, 1), (0.0, 0.5, 1.0, 0.5, 1)),
+            "floating_dual": ((0.03, 0.05, 0.62, 0.62, 2), (0.42, 0.38, 0.55, 0.55, 2)),
+            "reset_full": ((0.0, 0.0, 1.0, 1.0, 0), (0.0, 0.0, 1.0, 1.0, 0)),
+        }
+        if preset_id not in presets:
+            return False
+
+        main_box, sub_box = presets[preset_id]
+        main_c, sub_c = self.find_pip_pair_at(time)
+        target_c = self.project.clip_by_id(target_clip_id) if target_clip_id else None
+
+        self.undo_stack.beginMacro(f"Apply PiP Layout {preset_id}")
+        applied = False
+        if main_c is not None and sub_c is not None:
+            self.undo_stack.push(
+                _SetPipGeometry(
+                    self.project, main_c.id,
+                    pip_x=main_box[0], pip_y=main_box[1], pip_w=main_box[2], pip_h=main_box[3],
+                    border_width=main_box[4],
+                )
+            )
+            self.undo_stack.push(
+                _SetPipGeometry(
+                    self.project, sub_c.id,
+                    pip_x=sub_box[0], pip_y=sub_box[1], pip_w=sub_box[2], pip_h=sub_box[3],
+                    border_width=sub_box[4],
+                )
+            )
+            applied = True
+        else:
+            single = target_c or sub_c or main_c
+            if single is not None and self.clip_kind(single.id) == "video":
+                box = main_box if (preset_id == "reset_full") else (sub_box if single.track_index > 0 or preset_id.startswith("pip_") else main_box)
+                self.undo_stack.push(
+                    _SetPipGeometry(
+                        self.project, single.id,
+                        pip_x=box[0], pip_y=box[1], pip_w=box[2], pip_h=box[3],
+                        border_width=box[4],
+                    )
+                )
+                applied = True
+        self.undo_stack.endMacro()
+        if applied:
+            self.timeline_changed.emit()
+        return applied
+
     # ---------- subtitles ----------
     def add_subtitle(self, text: str, position: float, duration: float = 3.0) -> SubtitleClip:
         sub = SubtitleClip(text=text, position=position, duration=duration)
@@ -851,6 +1095,74 @@ class _SetObjectRemoval(QUndoCommand):
 
         c = self._p.clip_by_id(self._id)
         self._old = {k: getattr(c, k) for k in self._updates if c and hasattr(c, k)}
+
+    def redo(self):
+        c = self._p.clip_by_id(self._id)
+        if c:
+            for k, v in self._updates.items():
+                setattr(c, k, v)
+
+    def undo(self):
+        c = self._p.clip_by_id(self._id)
+        if c:
+            for k, v in self._old.items():
+                setattr(c, k, v)
+
+
+class _AddVideoTrack(QUndoCommand):
+    def __init__(self, project: Project):
+        super().__init__("Add Video Track")
+        self._p = project
+        self._idx: int | None = None
+
+    def redo(self):
+        tr = self._p.add_video_track()
+        self._idx = tr.index
+
+    def undo(self):
+        if self._idx is not None and len(self._p.video_tracks) > 1:
+            self._p.video_tracks = [t for t in self._p.video_tracks if t.index != self._idx]
+            for i, t in enumerate(self._p.video_tracks):
+                t.index = i
+
+
+class _SetPipGeometry(QUndoCommand):
+    def __init__(
+        self,
+        project: Project,
+        clip_id: str,
+        pip_x: float | None = None,
+        pip_y: float | None = None,
+        pip_w: float | None = None,
+        pip_h: float | None = None,
+        border_width: int | None = None,
+        border_color: str | None = None,
+    ):
+        super().__init__("Set PiP Geometry")
+        self._p = project
+        self._id = clip_id
+        self._updates: dict = {}
+        if pip_x is not None:
+            self._updates["pip_x"] = max(-1.0, min(float(pip_x), 1.0))
+        if pip_y is not None:
+            self._updates["pip_y"] = max(-1.0, min(float(pip_y), 1.0))
+        if pip_w is not None:
+            self._updates["pip_w"] = max(0.05, min(float(pip_w), 2.0))
+        if pip_h is not None:
+            self._updates["pip_h"] = max(0.05, min(float(pip_h), 2.0))
+        if border_width is not None:
+            self._updates["pip_border_width"] = max(0, min(int(border_width), 30))
+        if border_color is not None:
+            self._updates["pip_border_color"] = str(border_color)
+
+        c = self._p.clip_by_id(self._id)
+        self._old = {k: getattr(c, k) for k in self._updates if c and hasattr(c, k)}
+        self.has_changes = any(
+            abs(self._updates[k] - self._old.get(k, 0)) > 1e-5
+            if isinstance(self._updates[k], (int, float))
+            else self._updates[k] != self._old.get(k)
+            for k in self._updates
+        )
 
     def redo(self):
         c = self._p.clip_by_id(self._id)

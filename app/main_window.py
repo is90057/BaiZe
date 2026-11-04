@@ -126,6 +126,7 @@ class MainWindow(QMainWindow):
 
         # media -> timeline
         self.media_panel.add_to_timeline.connect(self.add_media_to_timeline)
+        self.media_panel.add_as_pip.connect(self.add_media_as_pip)
 
         # subtitle panel -> inspector & preview
         self.subtitle_panel.subtitle_selected.connect(self.inspector.select_subtitle)
@@ -133,6 +134,8 @@ class MainWindow(QMainWindow):
 
         # preview <-> timeline sync
         self.preview.time_changed.connect(self._sync_from_preview)
+        self.preview.pip_mode_changed.connect(self._on_pip_mode_changed)
+        self.preview.pip_geometry_live_changed.connect(lambda _cid: self.inspector.reload())
         self.timeline.playhead_changed.connect(self._sync_from_timeline)
         self.timeline.marks_changed.connect(self.update_marks)
         self.timeline.cut_requested.connect(self.cut_selected)
@@ -148,6 +151,8 @@ class MainWindow(QMainWindow):
         self.transport.range_mode_toggled.connect(self.timeline.set_range_select_mode)
         self.transport.split_pressed.connect(self.split_clip)
         self.transport.cut_pressed.connect(self.cut_selected)
+        self.transport.pip_mode_toggled.connect(self.preview.set_pip_edit_mode)
+        self.transport.pip_swap_pressed.connect(self.swap_pip_screens)
 
         # preview play state -> transport icon
         self.preview.play_state_changed.connect(self.transport.set_playing)
@@ -177,17 +182,47 @@ class MainWindow(QMainWindow):
     def add_media_to_timeline(self, media):
         position = self.timeline.playhead
         if media.has_video:
-            track = self.controller.project.video_tracks[-1].index
+            track = self.controller.project.video_tracks[0].index
             self.controller.add_clip(media, "video", track, position)
             if media.has_audio:
-                atrack = self.controller.project.audio_tracks[-1].index
+                atrack = self.controller.project.audio_tracks[0].index
                 self.controller.add_clip(media, "audio", atrack, position)
         elif media.has_audio:
-            track = self.controller.project.audio_tracks[-1].index
+            track = self.controller.project.audio_tracks[0].index
             self.controller.add_clip(media, "audio", track, position)
         else:
             return
         self.status.showMessage(tr("Added {name} at {pos}s").format(name=media.name, pos=position))
+
+    def add_media_as_pip(self, media):
+        if not media.has_video:
+            return
+        position = self.timeline.playhead
+        self.controller.add_pip_clip(media, position=position, track_index=1)
+        self.preview.set_pip_edit_mode(True)
+        self.timeline.adjust_size()
+        self.timeline.update()
+        self.status.showMessage(tr("Added {name} as Sub Screen (PiP) at {pos}s").format(name=media.name, pos=position))
+
+    def _on_pip_mode_changed(self, enabled: bool):
+        self.transport.btn_pip_mode.blockSignals(True)
+        self.transport.btn_pip_mode.setChecked(enabled)
+        self.transport.btn_pip_mode.blockSignals(False)
+        if hasattr(self.inspector, "pip_interactive_btn"):
+            self.inspector.pip_interactive_btn.blockSignals(True)
+            self.inspector.pip_interactive_btn.setChecked(enabled)
+            self.inspector.pip_interactive_btn.blockSignals(False)
+
+    def swap_pip_screens(self):
+        ok = self.controller.swap_pip_screens(self.timeline.playhead)
+        if ok:
+            self.status.showMessage(tr("Swapped Main Screen and Sub Screen"))
+        else:
+            QMessageBox.information(
+                self,
+                tr("Picture-in-Picture & Layout"),
+                tr("Place at least two video clips (e.g. on V1 and V2) at the playhead to swap Main and Sub screens."),
+            )
 
     def toggle_play(self):
         if self.preview.is_playing():

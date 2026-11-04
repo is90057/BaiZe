@@ -325,6 +325,9 @@ class TimelineWidget(QWidget):
             font = QFont("Helvetica", 9)
             p.setFont(font)
             name = c.name or (media.name if media else "")
+            if kind == "video" and (getattr(c, "has_custom_pip", False) or c.track_index > 0):
+                role_tag = tr("Sub") if c.track_index > 0 else "PiP"
+                name = f"[{role_tag}] {name}"
             fm = QFontMetrics(font)
             elided = fm.elidedText(name, Qt.TextElideMode.ElideMiddle, int(w - 24))
             p.drawText(QRectF(x + HANDLE_W + 2, y0 + 2, w - 2 * HANDLE_W - 6, h - 4),
@@ -886,6 +889,14 @@ class TimelineWidget(QWidget):
             "QMenu::item:selected { background: #3a6ea5; }")
         act_cut = menu.addAction(tr("Cut Selected (Video & Audio)\tCtrl+X"))
         act_split = menu.addAction(tr("Split at Playhead\tCtrl+B"))
+        act_set_sub = None
+        act_set_main = None
+        act_swap_pip = None
+        if hit.kind == "video" and hit.clip_id is not None:
+            menu.addSeparator()
+            act_set_sub = menu.addAction(f"🖼️ {tr('Set as Sub Screen (PiP)')}")
+            act_set_main = menu.addAction(f"⬇️ {tr('Set as Main Screen (V1)')}")
+            act_swap_pip = menu.addAction(f"🔄 {tr('Swap Main and Sub Screens')}")
         menu.addSeparator()
         act_delete = menu.addAction(tr("Delete Clip\tDelete"))
         action = menu.exec(global_pos)
@@ -893,6 +904,12 @@ class TimelineWidget(QWidget):
             self.cut_requested.emit()
         elif action == act_split:
             self.split_at_playhead()
+        elif act_set_sub is not None and action == act_set_sub:
+            self.controller.set_clip_as_sub_screen(hit.clip_id)
+        elif act_set_main is not None and action == act_set_main:
+            self.controller.set_clip_as_main_screen(hit.clip_id)
+        elif act_swap_pip is not None and action == act_swap_pip:
+            self.controller.swap_pip_screens(self.playhead)
         elif action == act_delete:
             self.delete_selected()
 
@@ -929,7 +946,12 @@ class TimelineWidget(QWidget):
                         continue
                     if kind == "video":
                         if media.has_video:
-                            self.controller.add_clip(media, "video", idx, t)
+                            vc = self.controller.add_clip(media, "video", idx, t)
+                            if idx >= 1 and not media.has_alpha:
+                                self.controller.set_clip_pip_geometry(
+                                    vc.id, pip_x=0.62, pip_y=0.60, pip_w=0.35, pip_h=0.35, border_width=2
+                                )
+                            self.controller.set_selection([vc.id])
                             added_any = True
                         if media.has_audio and project.audio_tracks:
                             atrack_idx = idx if any(tr.index == idx for tr in project.audio_tracks) else project.audio_tracks[0].index

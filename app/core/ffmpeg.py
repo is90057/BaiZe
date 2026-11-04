@@ -210,6 +210,87 @@ def composite_alpha(base_rgb: np.ndarray, overlay_rgba: np.ndarray, opacity: flo
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
+def composite_pip_layer(
+    canvas_rgb: np.ndarray,
+    layer: np.ndarray,
+    pip_x: float = 0.0,
+    pip_y: float = 0.0,
+    pip_w: float = 1.0,
+    pip_h: float = 1.0,
+    opacity: float = 1.0,
+    border_width: int = 0,
+    border_color: str = "#FFFFFF",
+) -> np.ndarray:
+    """Composite an RGB (HxWx3) or RGBA (HxWx4) layer onto `canvas_rgb` at normalized (pip_x, pip_y, pip_w, pip_h)."""
+    if canvas_rgb is None or layer is None:
+        return canvas_rgb
+    H, W = canvas_rgb.shape[:2]
+    rw = max(2, int(round(pip_w * W)))
+    rh = max(2, int(round(pip_h * H)))
+    rx = int(round(pip_x * W))
+    ry = int(round(pip_y * H))
+
+    if layer.shape[0] != rh or layer.shape[1] != rw:
+        try:
+            import cv2
+            layer = cv2.resize(layer, (rw, rh), interpolation=cv2.INTER_LINEAR)
+        except Exception:
+            yi = np.linspace(0, layer.shape[0] - 1, rh).astype(np.int32)
+            xi = np.linspace(0, layer.shape[1] - 1, rw).astype(np.int32)
+            layer = layer[np.ix_(yi, xi)]
+
+    if border_width > 0:
+        layer = layer.copy()
+        hex_c = (border_color or "#FFFFFF").lstrip("#")
+        if len(hex_c) >= 6:
+            try:
+                br, bg, bb = int(hex_c[0:2], 16), int(hex_c[2:4], 16), int(hex_c[4:6], 16)
+            except ValueError:
+                br, bg, bb = 255, 255, 255
+        else:
+            br, bg, bb = 255, 255, 255
+        bw = max(1, min(int(round(border_width * max(H / 720.0, 0.5))), rw // 2, rh // 2))
+        if layer.shape[2] == 4:
+            bval = np.array([br, bg, bb, 255], dtype=np.uint8)
+        else:
+            bval = np.array([br, bg, bb], dtype=np.uint8)
+        layer[:bw, :, :] = bval
+        layer[-bw:, :, :] = bval
+        layer[:, :bw, :] = bval
+        layer[:, -bw:, :] = bval
+
+    x0 = max(0, rx)
+    y0 = max(0, ry)
+    x1 = min(W, rx + rw)
+    y1 = min(H, ry + rh)
+    if x1 <= x0 or y1 <= y0:
+        return canvas_rgb
+
+    sx0 = x0 - rx
+    sy0 = y0 - ry
+    sx1 = sx0 + (x1 - x0)
+    sy1 = sy0 + (y1 - y0)
+
+    patch = layer[sy0:sy1, sx0:sx1]
+    out = canvas_rgb.copy()
+    dst = out[y0:y1, x0:x1]
+    op = float(max(0.0, min(opacity, 1.0)))
+
+    if patch.shape[2] == 4:
+        rgb = patch[:, :, :3].astype(np.float32)
+        alpha = (patch[:, :, 3:4].astype(np.float32) / 255.0) * op
+        blended = rgb * alpha + dst.astype(np.float32) * (1.0 - alpha)
+        out[y0:y1, x0:x1] = np.clip(blended, 0, 255).astype(np.uint8)
+    else:
+        if op >= 0.999:
+            out[y0:y1, x0:x1] = patch[:, :, :3]
+        else:
+            blended = patch[:, :, :3].astype(np.float32) * op + dst.astype(np.float32) * (1.0 - op)
+            out[y0:y1, x0:x1] = np.clip(blended, 0, 255).astype(np.uint8)
+
+    return np.ascontiguousarray(out)
+
+
 def thumbnail(path: str, duration: float, out_size: int = 320) -> str:
     """Generate and cache a thumbnail jpg; returns the cache path ('' on fail)."""
     key = _cache_key(path, out_size)
@@ -499,133 +580,188 @@ def build_ffmpeg_cmd(
 
     scale_vf = _scale_vf(scale_mode, W, H)
 
-    # ---------- video: cut-resolve per track, concat, then overlay ----------
-    track_outs: list[str] = []
-    for ti in sorted(vid):
-        cuts = _resolve_cuts(vid[ti], start, end)
-        if not cuts:
-            continue
-        seg_outs: list[str] = []
-        cursor = start
-        for c, t0, t1 in cuts:
-            gap = t0 - cursor
-            if gap > 1e-3:
-                seg_outs.append(add_gap_label(gap))
-            m = media_of(c)
-            c_speed = getattr(c, "speed", 1.0)
-            seg_len = t1 - t0
-            src_len = seg_len * c_speed
-            inp = new_input(m.path, clip_src_time(c, t0), src_len, is_image=m.is_image if m else False)
-            ol = new_label("v")
-            trans_vf = _build_clip_transition_vf(c, seg_len)
-            ck_vf = ""
-            is_ck = getattr(c, "chroma_key_enabled", False)
-            if is_ck:
-                ck_col = getattr(c, "chroma_key_color", "#00FF00").replace("#", "0x")
-                ck_sim = getattr(c, "chroma_key_similarity", 0.3)
-                ck_sm = getattr(c, "chroma_key_smoothness", 0.1)
-                ck_vf = f",colorkey={ck_col}:{ck_sim:.2f}:{ck_sm:.2f}"
+    def _build_clip_filter_chain(c, m, seg_len: float, box_w: int, box_h: int) -> tuple[str, bool]:
+        c_speed = getattr(c, "speed", 1.0)
+        c_scale_vf = _scale_vf(scale_mode, box_w, box_h)
+        trans_vf = _build_clip_transition_vf(c, seg_len)
+        ck_vf = ""
+        is_ck = getattr(c, "chroma_key_enabled", False)
+        if is_ck:
+            ck_col = getattr(c, "chroma_key_color", "#00FF00").replace("#", "0x")
+            ck_sim = getattr(c, "chroma_key_similarity", 0.3)
+            ck_sm = getattr(c, "chroma_key_smoothness", 0.1)
+            ck_vf = f",colorkey={ck_col}:{ck_sim:.2f}:{ck_sm:.2f}"
 
-            br = getattr(c, "brightness", 0.0)
-            ct = getattr(c, "contrast", 1.0)
-            sat = getattr(c, "saturation", 1.0)
-            cc_vf = ""
-            if abs(br) > 1e-3 or abs(ct - 1.0) > 1e-3 or abs(sat - 1.0) > 1e-3:
-                cc_vf = f",eq=brightness={br:.2f}:contrast={ct:.2f}:saturation={sat:.2f}"
+        br = getattr(c, "brightness", 0.0)
+        ct = getattr(c, "contrast", 1.0)
+        sat = getattr(c, "saturation", 1.0)
+        cc_vf = ""
+        if abs(br) > 1e-3 or abs(ct - 1.0) > 1e-3 or abs(sat - 1.0) > 1e-3:
+            cc_vf = f",eq=brightness={br:.2f}:contrast={ct:.2f}:saturation={sat:.2f}"
 
-            focus_mode = getattr(c, "focus_mode", "none")
-            blur_amt = getattr(c, "blur_amount", 0.0)
-            bf_vf = ""
-            if focus_mode == "gaussian_blur" or (focus_mode == "none" and blur_amt > 0):
-                bf_vf = f",boxblur=luma_radius={max(1, int(blur_amt or 5))}:luma_power=1"
-            elif focus_mode == "center_focus":
-                bf_vf = f",vignette=angle=0.5"
-            elif focus_mode == "tilt_shift":
-                bf_vf = f",boxblur=luma_radius={max(1, int(blur_amt or 6))}:luma_power=1"
+        focus_mode = getattr(c, "focus_mode", "none")
+        blur_amt = getattr(c, "blur_amount", 0.0)
+        bf_vf = ""
+        if focus_mode == "gaussian_blur" or (focus_mode == "none" and blur_amt > 0):
+            bf_vf = f",boxblur=luma_radius={max(1, int(blur_amt or 5))}:luma_power=1"
+        elif focus_mode == "center_focus":
+            bf_vf = ",vignette=angle=0.5"
+        elif focus_mode == "tilt_shift":
+            bf_vf = f",boxblur=luma_radius={max(1, int(blur_amt or 6))}:luma_power=1"
 
-            fx_vf = ""
-            fx_id = getattr(c, "video_fx", "none")
-            if fx_id == "explosion":
-                fx_vf = ",eq=contrast=1.45:brightness=0.15,vignette=angle=0.4"
-            elif fx_id == "flash":
-                fx_vf = ",eq=brightness=0.35:contrast=1.5,hue=s=1.2"
-            elif fx_id == "particles":
-                fx_vf = ",eq=contrast=1.2:saturation=1.4,colorbalance=rs=0.25:gs=0.15:bs=-0.15"
-            elif fx_id == "cyber_particles":
-                fx_vf = ",eq=contrast=1.25:saturation=1.5,colorbalance=rs=0.1:gs=-0.1:bs=0.25"
-            elif fx_id == "warm_film":
-                fx_vf = ",colorchannelmixer=1.15:0:0:0:0:1.05:0:0:0:0:0.85:0,eq=contrast=1.15:saturation=1.15"
-            elif fx_id == "cool_cyber":
-                fx_vf = ",colorchannelmixer=0.8:0:0:0:0:1.1:0:0:0:0:1.3:0,eq=contrast=1.2:saturation=1.2"
-            elif fx_id == "teal_orange":
-                fx_vf = ",colorbalance=rs=0.15:gs=0.0:bs=-0.15:rh=-0.1:gh=0.0:bh=0.15"
-            elif fx_id == "center_focus":
-                fx_vf = ",vignette=angle=0.5"
-            elif fx_id == "tilt_shift":
-                fx_vf = ",boxblur=luma_radius=6:luma_power=1"
-            elif fx_id == "grayscale":
-                fx_vf = ",hue=s=0"
-            elif fx_id == "sepia":
-                fx_vf = ",colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131"
-            elif fx_id == "invert":
-                fx_vf = ",negate"
-            elif fx_id == "vivid":
-                fx_vf = ",eq=contrast=1.35:saturation=1.4"
-            elif fx_id == "blur":
-                fx_vf = ",boxblur=4:1"
-            elif fx_id == "mirror_h":
-                fx_vf = ",hflip"
-            elif fx_id == "vignette":
-                fx_vf = ",vignette"
+        fx_vf = ""
+        fx_id = getattr(c, "video_fx", "none")
+        if fx_id == "explosion":
+            fx_vf = ",eq=contrast=1.45:brightness=0.15,vignette=angle=0.4"
+        elif fx_id == "flash":
+            fx_vf = ",eq=brightness=0.35:contrast=1.5,hue=s=1.2"
+        elif fx_id == "particles":
+            fx_vf = ",eq=contrast=1.2:saturation=1.4,colorbalance=rs=0.25:gs=0.15:bs=-0.15"
+        elif fx_id == "cyber_particles":
+            fx_vf = ",eq=contrast=1.25:saturation=1.5,colorbalance=rs=0.1:gs=-0.1:bs=0.25"
+        elif fx_id == "warm_film":
+            fx_vf = ",colorchannelmixer=1.15:0:0:0:0:1.05:0:0:0:0:0.85:0,eq=contrast=1.15:saturation=1.15"
+        elif fx_id == "cool_cyber":
+            fx_vf = ",colorchannelmixer=0.8:0:0:0:0:1.1:0:0:0:0:1.3:0,eq=contrast=1.2:saturation=1.2"
+        elif fx_id == "teal_orange":
+            fx_vf = ",colorbalance=rs=0.15:gs=0.0:bs=-0.15:rh=-0.1:gh=0.0:bh=0.15"
+        elif fx_id == "center_focus":
+            fx_vf = ",vignette=angle=0.5"
+        elif fx_id == "tilt_shift":
+            fx_vf = ",boxblur=luma_radius=6:luma_power=1"
+        elif fx_id == "grayscale":
+            fx_vf = ",hue=s=0"
+        elif fx_id == "sepia":
+            fx_vf = ",colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131"
+        elif fx_id == "invert":
+            fx_vf = ",negate"
+        elif fx_id == "vivid":
+            fx_vf = ",eq=contrast=1.35:saturation=1.4"
+        elif fx_id == "blur":
+            fx_vf = ",boxblur=4:1"
+        elif fx_id == "mirror_h":
+            fx_vf = ",hflip"
+        elif fx_id == "vignette":
+            fx_vf = ",vignette"
 
-            removal_vf = ""
-            if getattr(c, "object_removal_enabled", False):
-                masks = getattr(c, "object_removal_masks", [])
-                delogo_filters = []
-                for m in masks:
-                    cx = int(m.get("x", 0.5) * W)
-                    cy = int(m.get("y", 0.5) * H)
-                    r = max(4, int(m.get("radius", 0.05) * min(W, H)))
-                    x0 = max(0, cx - r)
-                    y0 = max(0, cy - r)
-                    w0 = min(W - x0, r * 2)
-                    h0 = min(H - y0, r * 2)
-                    if w0 > 0 and h0 > 0:
-                        delogo_filters.append(f"delogo=x={x0}:y={y0}:w={w0}:h={h0}")
-                if delogo_filters:
-                    removal_vf = "," + ",".join(delogo_filters)
+        removal_vf = ""
+        if getattr(c, "object_removal_enabled", False):
+            masks = getattr(c, "object_removal_masks", [])
+            delogo_filters = []
+            for mask_item in masks:
+                cx = int(mask_item.get("x", 0.5) * box_w)
+                cy = int(mask_item.get("y", 0.5) * box_h)
+                r = max(4, int(mask_item.get("radius", 0.05) * min(box_w, box_h)))
+                x0 = max(0, cx - r)
+                y0 = max(0, cy - r)
+                w0 = min(box_w - x0, r * 2)
+                h0 = min(box_h - y0, r * 2)
+                if w0 > 0 and h0 > 0:
+                    delogo_filters.append(f"delogo=x={x0}:y={y0}:w={w0}:h={h0}")
+            if delogo_filters:
+                removal_vf = "," + ",".join(delogo_filters)
 
-            speed_vf = f",setpts=PTS/{c_speed:.4f}" if abs(c_speed - 1.0) > 1e-3 else ""
+        border_vf = ""
+        bw = int(getattr(c, "pip_border_width", 0) or 0)
+        if bw > 0:
+            bcol = str(getattr(c, "pip_border_color", "#FFFFFF") or "#FFFFFF").replace("#", "0x")
+            border_vf = f",drawbox=x=0:y=0:w=iw:h=ih:color={bcol}:t={max(1, bw)}"
 
-            fmt_str = "format=rgba" if (is_ck or (m and (m.has_alpha or m.is_image))) else "format=yuv420p"
-            fil.append(
-                f"[{inp}:v]{scale_vf}{trans_vf}{ck_vf}{cc_vf}{bf_vf}{fx_vf}{removal_vf}{speed_vf},fps={out_fps:.3f},"
-                f"{fmt_str},setpts=PTS-STARTPTS[{ol}];"
-            )
-            seg_outs.append(ol)
-            cursor = t1
-        if play_len - (cursor - start) > 1e-3:
-            seg_outs.append(add_gap_label(play_len - (cursor - start)))
-        tl = new_label("t")
-        if len(seg_outs) > 1:
-            srcs = "".join(f"[{s}]" for s in seg_outs)
-            fil.append(f"{srcs}concat=n={len(seg_outs)}:v=1:a=0[{tl}];")
-        else:
-            fil.append(f"[{seg_outs[0]}]null[{tl}];")
-        track_outs.append(tl)
+        speed_vf = f",setpts=PTS/{c_speed:.4f}" if abs(c_speed - 1.0) > 1e-3 else ""
+        op = float(getattr(c, "opacity", 1.0))
+        op_vf = f",colorchannelmixer=aa={op:.3f}" if op < 0.999 else ""
+        needs_rgba = bool(is_ck or op < 0.999 or (m and (m.has_alpha or m.is_image)))
+        return f"{c_scale_vf}{trans_vf}{ck_vf}{cc_vf}{bf_vf}{fx_vf}{removal_vf}{border_vf}{speed_vf}{op_vf}", needs_rgba
 
-    if not track_outs:
+    any_custom_pip = any(
+        getattr(c, "has_custom_pip", False)
+        for clips in vid.values()
+        for c in clips
+    )
+    use_pip_compositor = len(vid) > 1 or any_custom_pip
+
+    # ---------- video: single-track concat OR multi-track / PiP compositor ----------
+    if use_pip_compositor and vid:
         base = new_label("b")
         fil.append(
-            f"color=black:s={W}x{H}:r={out_fps:.3f}:d={play_len:.6f},"
+            f"color=black:s={W}x{H}:r={out_fps:.3f}:d={max(play_len, 0.04):.6f},"
             f"setsar=1[{base}];"
         )
+        for ti in sorted(vid):
+            cuts = _resolve_cuts(vid[ti], start, end)
+            for c, t0, t1 in cuts:
+                m = media_of(c)
+                c_speed = getattr(c, "speed", 1.0)
+                seg_len = t1 - t0
+                src_len = seg_len * c_speed
+                inp = new_input(m.path, clip_src_time(c, t0), src_len, is_image=m.is_image if m else False)
+                ol = new_label("v")
+                cw = max(2, int(round(getattr(c, "pip_w", 1.0) * W)) & ~1)
+                ch = max(2, int(round(getattr(c, "pip_h", 1.0) * H)) & ~1)
+                cx = int(round(getattr(c, "pip_x", 0.0) * W))
+                cy = int(round(getattr(c, "pip_y", 0.0) * H))
+                chain_vf, needs_rgba = _build_clip_filter_chain(c, m, seg_len, cw, ch)
+                fmt_str = "format=rgba" if needs_rgba else "format=yuv420p"
+                st = max(0.0, t0 - start)
+                et = max(st, t1 - start)
+                fil.append(
+                    f"[{inp}:v]{chain_vf},fps={out_fps:.3f},"
+                    f"{fmt_str},setpts=PTS-STARTPTS+{st:.6f}/TB[{ol}];"
+                )
+                ov_lbl = new_label("ov")
+                fil.append(
+                    f"[{base}][{ol}]overlay=x={cx}:y={cy}:enable='between(t,{st:.6f},{et:.6f})':"
+                    f"eof_action=pass:format=auto[{ov_lbl}];"
+                )
+                base = ov_lbl
     else:
-        base = track_outs[0]
-        for upper in track_outs[1:]:
-            ol = new_label("ov")
-            fil.append(f"[{base}][{upper}]overlay=format=auto:eof_action=pass[{ol}];")
-            base = ol
+        track_outs: list[str] = []
+        for ti in sorted(vid):
+            cuts = _resolve_cuts(vid[ti], start, end)
+            if not cuts:
+                continue
+            seg_outs: list[str] = []
+            cursor = start
+            for c, t0, t1 in cuts:
+                gap = t0 - cursor
+                if gap > 1e-3:
+                    seg_outs.append(add_gap_label(gap))
+                m = media_of(c)
+                c_speed = getattr(c, "speed", 1.0)
+                seg_len = t1 - t0
+                src_len = seg_len * c_speed
+                inp = new_input(m.path, clip_src_time(c, t0), src_len, is_image=m.is_image if m else False)
+                ol = new_label("v")
+                chain_vf, needs_rgba = _build_clip_filter_chain(c, m, seg_len, W, H)
+                fmt_str = "format=rgba" if needs_rgba else "format=yuv420p"
+                fil.append(
+                    f"[{inp}:v]{chain_vf},fps={out_fps:.3f},"
+                    f"{fmt_str},setpts=PTS-STARTPTS[{ol}];"
+                )
+                seg_outs.append(ol)
+                cursor = t1
+            if play_len - (cursor - start) > 1e-3:
+                seg_outs.append(add_gap_label(play_len - (cursor - start)))
+            tl = new_label("t")
+            if len(seg_outs) > 1:
+                srcs = "".join(f"[{s}]" for s in seg_outs)
+                fil.append(f"{srcs}concat=n={len(seg_outs)}:v=1:a=0[{tl}];")
+            else:
+                fil.append(f"[{seg_outs[0]}]null[{tl}];")
+            track_outs.append(tl)
+
+        if not track_outs:
+            base = new_label("b")
+            fil.append(
+                f"color=black:s={W}x{H}:r={out_fps:.3f}:d={play_len:.6f},"
+                f"setsar=1[{base}];"
+            )
+        else:
+            base = track_outs[0]
+            for upper in track_outs[1:]:
+                ol = new_label("ov")
+                fil.append(f"[{base}][{upper}]overlay=format=auto:eof_action=pass[{ol}];")
+                base = ol
 
     # ---------- subtitles: drawtext or PNG overlay ----------
     if project.subtitles:

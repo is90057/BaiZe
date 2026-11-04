@@ -36,6 +36,7 @@ class MediaListWidget(QListWidget):
 
 class MediaPanel(QWidget):
     add_to_timeline = pyqtSignal(object)
+    add_as_pip = pyqtSignal(object)
     media_removed = pyqtSignal(object)
 
     def __init__(self, controller, parent=None):
@@ -55,6 +56,12 @@ class MediaPanel(QWidget):
         self._title.setStyleSheet("font-weight: bold; color: #d0d0d6;")
         head.addWidget(self._title)
         head.addStretch(1)
+        self._pip_btn = QToolButton()
+        self._pip_btn.setText(f"🖼️ {tr('Add as Sub Screen')}")
+        self._pip_btn.setToolTip(tr("Add selected media as Picture-in-Picture sub screen (V2)"))
+        self._pip_btn.clicked.connect(self._on_add_pip_clicked)
+        head.addWidget(self._pip_btn)
+
         self._import_btn = QToolButton()
         self._import_btn.setText(tr("Import…"))
         self._import_btn.setToolTip(tr("Import media files"))
@@ -83,8 +90,20 @@ class MediaPanel(QWidget):
     def retranslate(self):
         self._title.setText(tr("Media Library"))
         self._hint.setText(tr("Drag media onto a timeline track to add it."))
+        self._pip_btn.setText(f"🖼️ {tr('Add as Sub Screen')}")
+        self._pip_btn.setToolTip(tr("Add selected media as Picture-in-Picture sub screen (V2)"))
         self._import_btn.setText(tr("Import…"))
         self._import_btn.setToolTip(tr("Import media files"))
+
+    def _on_add_pip_clicked(self):
+        items = self.list.selectedItems()
+        if not items and self.list.count() > 0:
+            items = [self.list.item(self.list.count() - 1)]
+        for it in items:
+            mid = it.data(Qt.ItemDataRole.UserRole)
+            media = self.media_item(mid)
+            if media and media.has_video:
+                self.add_as_pip.emit(media)
 
     def _on_import_clicked(self):
         self.import_files()
@@ -168,6 +187,7 @@ class MediaPanel(QWidget):
             "QMenu { background: #26262c; color: #e2e2e2; border: 1px solid #3a3a42;}"
             "QMenu::item:selected { background: #3a6ea5; }")
         add_act = menu.addAction(tr("Add to Timeline (V1 at playhead)"))
+        pip_act = menu.addAction(f"🖼️ {tr('Add as Sub Screen (V2 PiP)')}")
         del_act = menu.addAction(tr("Remove from Library"))
         action = menu.exec(self.list.mapToGlobal(pos))
         if action == add_act:
@@ -175,6 +195,11 @@ class MediaPanel(QWidget):
             media = self.media_item(mid)
             if media:
                 self.add_to_timeline.emit(media)
+        elif action == pip_act:
+            mid = item.data(Qt.ItemDataRole.UserRole)
+            media = self.media_item(mid)
+            if media and media.has_video:
+                self.add_as_pip.emit(media)
         elif action == del_act:
             mid = item.data(Qt.ItemDataRole.UserRole)
             media = self.media_item(mid)
