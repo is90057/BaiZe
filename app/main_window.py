@@ -50,8 +50,9 @@ class _UpdateCheckJob(QRunnable):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, splash=None):
         super().__init__()
+        self._splash = splash
         self._version = get_current_version()
         self._checking_update = False
         self.setWindowTitle(f"BaiZe {self._version} — Untitled")
@@ -69,7 +70,8 @@ class MainWindow(QMainWindow):
         self._update_title()
         self.update_marks()
         _update_emitter.finished.connect(self._on_update_check_finished)
-        QTimer.singleShot(2000, lambda: self.check_for_updates(silent=True))
+        if splash is None:
+            QTimer.singleShot(2000, lambda: self.check_for_updates(silent=True))
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -515,6 +517,58 @@ class MainWindow(QMainWindow):
                 self._version_btn.setText(f"⏳ {tr('Checking for updates…')} ({self._version})")
         QThreadPool.globalInstance().start(_UpdateCheckJob(self._version, silent=silent))
 
+    def handle_splash_update_result(self, res: UpdateCheckResult | None):
+        """Handle update check result that was already performed during splash screen."""
+        if res is None:
+            return
+        cur_ver = res.current_version or self._version
+        self._version = cur_ver
+        self._update_title()
+
+        if res.has_update and res.latest_version:
+            if hasattr(self, "_version_btn"):
+                self._version_btn.setText(
+                    f"🆕 {tr('Update Available')}: {res.latest_version} ({tr('Current')}: {cur_ver})"
+                )
+                self._version_btn.setStyleSheet(
+                    "QPushButton { background: #1e6b45; color: #ffffff; font-weight: bold; "
+                    "border: 1px solid #2ea066; border-radius: 3px; padding: 2px 8px; font-size: 11px; }"
+                    "QPushButton:hover { background: #268556; }"
+                )
+            self.status.showMessage(
+                tr("New version {latest} is available! (Current: {current})").format(
+                    latest=res.latest_version, current=cur_ver
+                )
+            )
+            QTimer.singleShot(350, lambda: self._show_update_available_dialog(res))
+        else:
+            if hasattr(self, "_version_btn"):
+                self._version_btn.setText(f"🔖 {tr('Version')}: {cur_ver} ({tr('Check for Updates')})")
+                self._version_btn.setToolTip(f"{tr('Current Version (Git Tag)')}: {cur_ver}\n{RELEASES_URL}")
+
+    def _show_update_available_dialog(self, res: UpdateCheckResult):
+        cur_ver = res.current_version or self._version
+        box = QMessageBox(self)
+        box.setWindowTitle(tr("Update Available"))
+        box.setIcon(QMessageBox.Icon.Information)
+        notes_block = ""
+        if res.release_notes:
+            trimmed = res.release_notes[:500] + ("…" if len(res.release_notes) > 500 else "")
+            notes_block = f"\n\n{tr('Release Notes')}:\n{trimmed}"
+        pub_str = f" ({res.published_at})" if res.published_at else ""
+        box.setText(
+            f"🎉 {tr('A new version of BaiZe is available!')}\n\n"
+            f"• {tr('Current Version (Git Tag)')}: {cur_ver}\n"
+            f"• {tr('Latest Version on GitHub')}: {res.latest_version}{pub_str}\n"
+            f"• {tr('Releases URL')}: {res.release_url}"
+            f"{notes_block}"
+        )
+        btn_open = box.addButton(tr("Download from GitHub Releases"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(tr("Later"), QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() == btn_open:
+            QDesktopServices.openUrl(QUrl(res.release_url or RELEASES_URL))
+
     @pyqtSlot(object, bool)
     def _on_update_check_finished(self, res: UpdateCheckResult, silent: bool):
         self._checking_update = False
@@ -537,26 +591,7 @@ class MainWindow(QMainWindow):
                     latest=res.latest_version, current=cur_ver
                 )
             )
-            box = QMessageBox(self)
-            box.setWindowTitle(tr("Update Available"))
-            box.setIcon(QMessageBox.Icon.Information)
-            notes_block = ""
-            if res.release_notes:
-                trimmed = res.release_notes[:500] + ("…" if len(res.release_notes) > 500 else "")
-                notes_block = f"\n\n{tr('Release Notes')}:\n{trimmed}"
-            pub_str = f" ({res.published_at})" if res.published_at else ""
-            box.setText(
-                f"🎉 {tr('A new version of BaiZe is available!')}\n\n"
-                f"• {tr('Current Version (Git Tag)')}: {cur_ver}\n"
-                f"• {tr('Latest Version on GitHub')}: {res.latest_version}{pub_str}\n"
-                f"• {tr('Releases URL')}: {res.release_url}"
-                f"{notes_block}"
-            )
-            btn_open = box.addButton(tr("Download from GitHub Releases"), QMessageBox.ButtonRole.AcceptRole)
-            box.addButton(tr("Later"), QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            if box.clickedButton() == btn_open:
-                QDesktopServices.openUrl(QUrl(res.release_url or RELEASES_URL))
+            self._show_update_available_dialog(res)
             return
 
         if hasattr(self, "_version_btn"):

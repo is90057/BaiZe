@@ -498,6 +498,9 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "Border Color": {"zh_TW": "外框顏色", "zh_CN": "边框颜色"},
 
     # ---- Update Checker & Version ----
+    "Professional Video Editor": {"zh_TW": "專業非線性影片剪輯軟體", "zh_CN": "专业非线性视频剪辑软件"},
+    "Click to continue": {"zh_TW": "點擊任意處進入", "zh_CN": "点击任意处进入"},
+    "Starting BaiZe…": {"zh_TW": "正在啟動 BaiZe…", "zh_CN": "正在启动 BaiZe…"},
     "Version": {"zh_TW": "版本", "zh_CN": "版本"},
     "Current": {"zh_TW": "目前", "zh_CN": "当前"},
     "Current Version (Git Tag)": {"zh_TW": "目前版本 (Git Tag)", "zh_CN": "当前版本 (Git Tag)"},
