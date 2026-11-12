@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QSettings
-from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QCloseEvent, QActionGroup
+from PyQt6.QtCore import Qt, QSettings, QUrl, QTimer, QObject, QRunnable, QThreadPool, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QAction, QKeySequence, QShortcut, QCloseEvent, QActionGroup, QDesktopServices
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSplitter,
     QScrollArea, QFileDialog, QMessageBox, QDockWidget, QLineEdit,
-    QSpinBox, QPlainTextEdit, QComboBox, QTextEdit, QTabWidget,
+    QSpinBox, QPlainTextEdit, QComboBox, QTextEdit, QTabWidget, QPushButton,
 )
 
 from .controllers.project_controller import ProjectController
+from .core.updater import RELEASES_URL, UpdateCheckResult, get_current_version, check_github_updates
 from .models.project import Project, save_project, load_project
 from .views.media_panel import MediaPanel
 from .views.templates_panel import TemplatesPanel
@@ -26,10 +27,34 @@ from .theme import DARK_QSS
 from .i18n import tr, subscribe, set_language, current_language, LANGUAGES
 
 
+class _UpdateEmitter(QObject):
+    finished = pyqtSignal(object, bool)
+
+
+_update_emitter = _UpdateEmitter()
+
+
+class _UpdateCheckJob(QRunnable):
+    def __init__(self, current_version: str, silent: bool = False):
+        super().__init__()
+        self.current_version = current_version
+        self.silent = silent
+
+    @pyqtSlot()
+    def run(self):
+        res = check_github_updates(self.current_version)
+        try:
+            _update_emitter.finished.emit(res, self.silent)
+        except RuntimeError:
+            pass
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BaiZe — Untitled")
+        self._version = get_current_version()
+        self._checking_update = False
+        self.setWindowTitle(f"BaiZe {self._version} — Untitled")
         self.resize(1440, 900)
         self.controller = ProjectController()
         self._path = ""
@@ -43,6 +68,8 @@ class MainWindow(QMainWindow):
         self._build_shortcuts()
         self._update_title()
         self.update_marks()
+        _update_emitter.finished.connect(self._on_update_check_finished)
+        QTimer.singleShot(2000, lambda: self.check_for_updates(silent=True))
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -110,6 +137,16 @@ class MainWindow(QMainWindow):
 
         self.status = self.statusBar()
         self.status.showMessage(tr("Ready"))
+        self._version_btn = QPushButton(f"🔖 {tr('Version')}: {self._version} ({tr('Check for Updates')})")
+        self._version_btn.setToolTip(f"{tr('Current Version (Git Tag)')}: {self._version}\n{RELEASES_URL}")
+        self._version_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._version_btn.setStyleSheet(
+            "QPushButton { background: #262932; color: #b8c4d8; border: 1px solid #3c4252; "
+            "border-radius: 3px; padding: 2px 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #324a6d; color: #ffffff; }"
+        )
+        self._version_btn.clicked.connect(lambda: self.check_for_updates(silent=False))
+        self.status.addPermanentWidget(self._version_btn)
 
     def _timeline_hint(self) -> QLabel:
         self._hint_label = QLabel(tr("Timeline hint"))
@@ -354,9 +391,10 @@ class MainWindow(QMainWindow):
             clean = self.controller.undo_stack.isClean()
         except RuntimeError:
             return
+        self._version = get_current_version()
         name = self.controller.project.name or "Untitled"
         dirty_marker = "" if clean else "*"
-        self.setWindowTitle(f"BaiZe — {name}{dirty_marker}")
+        self.setWindowTitle(f"BaiZe {self._version} — {name}{dirty_marker}")
 
     # ---------------- menu ----------------
     def _build_menu(self):
@@ -425,6 +463,15 @@ class MainWindow(QMainWindow):
                 act.setChecked(True)
 
         self.m_help = mb.addMenu(tr("&Help"))
+        self.m_help.addAction(
+            f"🔄 {tr('Check for Updates…')} ({self._version})",
+            lambda: self.check_for_updates(silent=False),
+        )
+        self.m_help.addAction(
+            f"🌐 {tr('Open GitHub Releases Page')}",
+            lambda: QDesktopServices.openUrl(QUrl(RELEASES_URL)),
+        )
+        self.m_help.addSeparator()
         self.m_help.addAction(tr("About BaiZe"), self._about)
 
     def _set_language(self, code: str):
@@ -447,9 +494,117 @@ class MainWindow(QMainWindow):
         sc.activated.connect(fn)
 
     def _about(self):
+        self._version = get_current_version()
         QMessageBox.about(
-            self, tr("About BaiZe"),
-            f"BaiZe\n\n{tr('About text')}")
+            self,
+            tr("About BaiZe"),
+            f"BaiZe {self._version}\n"
+            f"{tr('Current Version (Git Tag)')}: {self._version}\n"
+            f"GitHub Releases: {RELEASES_URL}\n\n"
+            f"{tr('About text')}",
+        )
+
+    def check_for_updates(self, silent: bool = False):
+        if self._checking_update:
+            return
+        self._version = get_current_version()
+        self._checking_update = True
+        if not silent:
+            self.status.showMessage(f"🔄 {tr('Checking for updates from GitHub Releases…')} ({RELEASES_URL})")
+            if hasattr(self, "_version_btn"):
+                self._version_btn.setText(f"⏳ {tr('Checking for updates…')} ({self._version})")
+        QThreadPool.globalInstance().start(_UpdateCheckJob(self._version, silent=silent))
+
+    @pyqtSlot(object, bool)
+    def _on_update_check_finished(self, res: UpdateCheckResult, silent: bool):
+        self._checking_update = False
+        cur_ver = res.current_version or self._version
+        self._version = cur_ver
+        self._update_title()
+
+        if res.has_update and res.latest_version:
+            if hasattr(self, "_version_btn"):
+                self._version_btn.setText(
+                    f"🆕 {tr('Update Available')}: {res.latest_version} ({tr('Current')}: {cur_ver})"
+                )
+                self._version_btn.setStyleSheet(
+                    "QPushButton { background: #1e6b45; color: #ffffff; font-weight: bold; "
+                    "border: 1px solid #2ea066; border-radius: 3px; padding: 2px 8px; font-size: 11px; }"
+                    "QPushButton:hover { background: #268556; }"
+                )
+            self.status.showMessage(
+                tr("New version {latest} is available! (Current: {current})").format(
+                    latest=res.latest_version, current=cur_ver
+                )
+            )
+            box = QMessageBox(self)
+            box.setWindowTitle(tr("Update Available"))
+            box.setIcon(QMessageBox.Icon.Information)
+            notes_block = ""
+            if res.release_notes:
+                trimmed = res.release_notes[:500] + ("…" if len(res.release_notes) > 500 else "")
+                notes_block = f"\n\n{tr('Release Notes')}:\n{trimmed}"
+            pub_str = f" ({res.published_at})" if res.published_at else ""
+            box.setText(
+                f"🎉 {tr('A new version of BaiZe is available!')}\n\n"
+                f"• {tr('Current Version (Git Tag)')}: {cur_ver}\n"
+                f"• {tr('Latest Version on GitHub')}: {res.latest_version}{pub_str}\n"
+                f"• {tr('Releases URL')}: {res.release_url}"
+                f"{notes_block}"
+            )
+            btn_open = box.addButton(tr("Download from GitHub Releases"), QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(tr("Later"), QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() == btn_open:
+                QDesktopServices.openUrl(QUrl(res.release_url or RELEASES_URL))
+            return
+
+        if hasattr(self, "_version_btn"):
+            self._version_btn.setText(f"🔖 {tr('Version')}: {cur_ver} ({tr('Check for Updates')})")
+            self._version_btn.setToolTip(f"{tr('Current Version (Git Tag)')}: {cur_ver}\n{RELEASES_URL}")
+            self._version_btn.setStyleSheet(
+                "QPushButton { background: #262932; color: #b8c4d8; border: 1px solid #3c4252; "
+                "border-radius: 3px; padding: 2px 8px; font-size: 11px; }"
+                "QPushButton:hover { background: #324a6d; color: #ffffff; }"
+            )
+
+        if silent:
+            return
+
+        if res.latest_version:
+            self.status.showMessage(
+                tr("You are using the latest version ({version}).").format(version=cur_ver)
+            )
+            box = QMessageBox(self)
+            box.setWindowTitle(tr("Check for Updates"))
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(
+                f"✅ {tr('You are already on the latest version!')}\n\n"
+                f"• {tr('Current Version (Git Tag)')}: {cur_ver}\n"
+                f"• {tr('Latest Version on GitHub')}: {res.latest_version}\n"
+                f"• {tr('Releases URL')}: {RELEASES_URL}"
+            )
+            btn_open = box.addButton(tr("Open GitHub Releases Page"), QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            if box.clickedButton() == btn_open:
+                QDesktopServices.openUrl(QUrl(RELEASES_URL))
+        else:
+            self.status.showMessage(tr("Could not retrieve release version from GitHub."))
+            box = QMessageBox(self)
+            box.setWindowTitle(tr("Check for Updates"))
+            box.setIcon(QMessageBox.Icon.Information)
+            err_detail = f"\n({res.error})" if res.error else ""
+            box.setText(
+                f"• {tr('Current Version (Git Tag)')}: {cur_ver}\n"
+                f"• {tr('Releases URL')}: {RELEASES_URL}\n\n"
+                f"{tr('No newer release was found on GitHub Releases, or the network is unreachable.')}{err_detail}"
+            )
+            btn_open = box.addButton(tr("Open GitHub Releases Page"), QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Ok)
+            box.exec()
+            if box.clickedButton() == btn_open:
+                QDesktopServices.openUrl(QUrl(RELEASES_URL))
 
     def _apply_language(self):
         # retranslate dock titles & labels
@@ -462,6 +617,9 @@ class MainWindow(QMainWindow):
         self.left_tabs.setTabText(4, tr("Subtitles"))
         self._hint_label.setText(tr("Timeline hint"))
         self.status.showMessage(tr("Ready"))
+        if hasattr(self, "_version_btn"):
+            self._version_btn.setText(f"🔖 {tr('Version')}: {self._version} ({tr('Check for Updates')})")
+            self._version_btn.setToolTip(f"{tr('Current Version (Git Tag)')}: {self._version}\n{RELEASES_URL}")
         # child panels
         self.media_panel.retranslate()
         self.templates_panel.retranslate()

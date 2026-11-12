@@ -496,6 +496,43 @@ _TRANSLATIONS: dict[str, dict[str, str]] = {
     "Quick Position": {"zh_TW": "九宮格快速對齊", "zh_CN": "九宫格快速对齐"},
     "Border": {"zh_TW": "外框粗細與顏色", "zh_CN": "边框粗细与颜色"},
     "Border Color": {"zh_TW": "外框顏色", "zh_CN": "边框颜色"},
+
+    # ---- Update Checker & Version ----
+    "Version": {"zh_TW": "版本", "zh_CN": "版本"},
+    "Current": {"zh_TW": "目前", "zh_CN": "当前"},
+    "Current Version (Git Tag)": {"zh_TW": "目前版本 (Git Tag)", "zh_CN": "当前版本 (Git Tag)"},
+    "Latest Version on GitHub": {"zh_TW": "GitHub 最新版本", "zh_CN": "GitHub 最新版本"},
+    "Releases URL": {"zh_TW": "檢查與下載網址", "zh_CN": "检查与下载网址"},
+    "Release Notes": {"zh_TW": "更新內容說明", "zh_CN": "更新内容说明"},
+    "Check for Updates": {"zh_TW": "檢查更新", "zh_CN": "检查更新"},
+    "Check for Updates…": {"zh_TW": "檢查更新…", "zh_CN": "检查更新…"},
+    "Checking for updates…": {"zh_TW": "檢查更新中…", "zh_CN": "检查更新中…"},
+    "Checking for updates from GitHub Releases…": {
+        "zh_TW": "正在從 GitHub Releases 檢查最新版本…",
+        "zh_CN": "正在从 GitHub Releases 检查最新版本…",
+    },
+    "Open GitHub Releases Page": {"zh_TW": "開啟 GitHub Releases 頁面", "zh_CN": "打开 GitHub Releases 页面"},
+    "Update Available": {"zh_TW": "發現新版本", "zh_CN": "发现新版本"},
+    "A new version of BaiZe is available!": {"zh_TW": "發現 BaiZe 有新版本可供更新！", "zh_CN": "发现 BaiZe 有新版本可供更新！"},
+    "New version {latest} is available! (Current: {current})": {
+        "zh_TW": "發現新版本 {latest}！（目前版本：{current}）",
+        "zh_CN": "发现新版本 {latest}！（当前版本：{current}）",
+    },
+    "Download from GitHub Releases": {"zh_TW": "前往 GitHub Releases 下載更新", "zh_CN": "前往 GitHub Releases 下载更新"},
+    "Later": {"zh_TW": "稍後再說", "zh_CN": "稍后再说"},
+    "You are already on the latest version!": {"zh_TW": "目前已是最新版本！", "zh_CN": "目前已是最新版本！"},
+    "You are using the latest version ({version}).": {
+        "zh_TW": "目前使用的是最新版本 ({version})。",
+        "zh_CN": "当前使用的是最新版本 ({version})。",
+    },
+    "Could not retrieve release version from GitHub.": {
+        "zh_TW": "無法從 GitHub 取得發布版本資訊。",
+        "zh_CN": "无法从 GitHub 获取发布版本信息。",
+    },
+    "No newer release was found on GitHub Releases, or the network is unreachable.": {
+        "zh_TW": "目前在 GitHub Releases 上尚未發現更新的發布版本，或網路無法連線。",
+        "zh_CN": "目前在 GitHub Releases 上尚未发现更新的发布版本，或网络无法连接。",
+    },
 }
 
 
